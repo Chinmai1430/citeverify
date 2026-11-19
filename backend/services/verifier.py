@@ -1,26 +1,46 @@
 import os
+import time
 from collections import Counter
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
-from schemas import (
-    ClaimStatus,
-    ClaimVerificationResult,
-    ConfidenceLevel,
-    ExtractedClaim,
-    RetrievedSource,
-    VerificationReport,
-)
+try:
+    from backend.schemas import (
+        ClaimStatus,
+        ClaimVerificationResult,
+        ConfidenceLevel,
+        ExtractedClaim,
+        RetrievedSource,
+        VerificationReport,
+    )
+except ImportError:
+    from schemas import (
+        ClaimStatus,
+        ClaimVerificationResult,
+        ConfidenceLevel,
+        ExtractedClaim,
+        RetrievedSource,
+        VerificationReport,
+    )
 
 load_dotenv()
+
+PRIMARY_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+FALLBACK_GEMINI_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+RETRY_SCHEDULE = [
+    (PRIMARY_GEMINI_MODEL, 1.0),
+    (PRIMARY_GEMINI_MODEL, 2.0),
+    (FALLBACK_GEMINI_MODEL, 0.0),
+]
 
 
 class _LLMVerdictOutput(BaseModel):
     """Strict structured output schema enforced on Gemini responses."""
+
     verdict: ClaimStatus
     explanation: str = Field(
         description="Concise 1-2 sentence explanation comparing the claim to the source evidence."
@@ -51,7 +71,7 @@ def verify_single_claim(
     citation_label = _format_citation(claim, source)
     flags = list(source.mismatch_flags)
 
-    # Rule 1: Paper not found in open scholarly indexes — never fabricate verification
+    # Rule 1: Paper not found in open scholarly indexes - never fabricate verification
     if not source.found:
         if "Reference not found in open scholarly indexes" not in flags:
             flags.append("Reference not found in open scholarly indexes")
@@ -75,7 +95,7 @@ def verify_single_claim(
             mismatch_flags=flags,
         )
 
-    # Rule 2: Retracted source — immediately flag as potentially outdated / invalid
+    # Rule 2: Retracted source - immediately flag as potentially outdated / invalid
     if source.is_retracted:
         if "Retracted publication" not in flags:
             flags.append("Retracted publication")
@@ -164,51 +184,36 @@ CLASSIFICATION RULES:
 
 HONEST UNCERTAINTY RULES:
 - Never treat an automated verdict as final academic judgment.
-- If Evidence Scope Available is ABSTRACT_ONLY, explicitly mention in uncertainty_note that full text/methods were not inspected and set needs_human_review=true unless the abstract states the exact metric verbatim.
+- If Evidence Scope Available is ABSTRACT_ONLY, explicitly mention in uncertainty_note that full text/methods were not inspected and set needs_human_review=True unless the abstract states the exact metric verbatim.
 - Flag any numerical distortion, scope exaggeration, or mismatched citation in extra_mismatch_flags.
 """
 
-    try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_LLMVerdictOutput,
-            ),
-        )
-        llm_result = _LLMVerdictOutput.model_validate_json(response.text)
+    client = genai.Client(api_key=api_key)
+    llm_result: Optional[_LLMVerdictOutput] = None
+    last_exc: Optional[Exception] = None
 
-        # Calibrate uncertainty honestly for paywalled / abstract-only evidence
-        calibrated_confidence = llm_result.confidence
-        needs_review = llm_result.needs_human_review
-        uncertainty_note = llm_result.uncertainty_note
+    for attempt_idx, (model_name, retry_delay) in enumerate(RETRY_SCHEDULE, start=1):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=_LLMVerdictOutput,
+                ),
+            )
+            llm_result = _LLMVerdictOutput.model_validate_json(response.text)
+            break
+        except Exception as exc:
+            last_exc = exc
+            print(
+                f"Gemini API error (attempt {attempt_idx}/{len(RETRY_SCHEDULE)}, "
+                f"model={model_name}): {exc}"
+            )
+            if retry_delay > 0:
+                time.sleep(retry_delay)
 
-        if source.evidence_scope == "ABSTRACT_ONLY":
-            if calibrated_confidence == ConfidenceLevel.HIGH and llm_result.verdict == ClaimStatus.SUPPORTED:
-                calibrated_confidence = ConfidenceLevel.MEDIUM
-            needs_review = True
-            if "abstract" not in uncertainty_note.lower():
-                uncertainty_note += " (Evaluated using abstract only; verify against full text.)"
-
-        combined_flags = list(dict.fromkeys(flags + llm_result.extra_mismatch_flags))
-
-        return ClaimVerificationResult(
-            claim_id=claim.claim_id,
-            claim_text=claim.claim_text,
-            matched_citation=citation_label,
-            evidence_passage=source.source_passage,
-            verdict=llm_result.verdict,
-            explanation=llm_result.explanation,
-            confidence=calibrated_confidence,
-            uncertainty_note=uncertainty_note,
-            needs_human_review=needs_review,
-            source_url=source.doi_url,
-            mismatch_flags=combined_flags,
-        )
-    except Exception as exc:
-        print("Gemini API error:", exc)
+    if llm_result is None:
         return ClaimVerificationResult(
             claim_id=claim.claim_id,
             claim_text=claim.claim_text,
@@ -217,11 +222,42 @@ HONEST UNCERTAINTY RULES:
             verdict=ClaimStatus.UNSUPPORTED,
             explanation="Automated evidence comparison encountered a temporary API error.",
             confidence=ConfidenceLevel.LOW,
-            uncertainty_note=f"Fallback triggered ({type(exc).__name__}). Manual review required.",
+            uncertainty_note=(
+                f"Fallback triggered ({type(last_exc).__name__ if last_exc else 'UnknownError'}). "
+                "Manual review required."
+            ),
             needs_human_review=True,
             source_url=source.doi_url,
             mismatch_flags=flags,
         )
+
+    # Calibrate uncertainty honestly for paywalled / abstract-only evidence
+    calibrated_confidence = llm_result.confidence
+    needs_review = llm_result.needs_human_review
+    uncertainty_note = llm_result.uncertainty_note
+
+    if source.evidence_scope == "ABSTRACT_ONLY":
+        if calibrated_confidence == ConfidenceLevel.HIGH and llm_result.verdict == ClaimStatus.SUPPORTED:
+            calibrated_confidence = ConfidenceLevel.MEDIUM
+        needs_review = True
+        if "abstract" not in uncertainty_note.lower():
+            uncertainty_note += " (Evaluated using abstract only; verify against full text.)"
+
+    combined_flags = list(dict.fromkeys(flags + llm_result.extra_mismatch_flags))
+
+    return ClaimVerificationResult(
+        claim_id=claim.claim_id,
+        claim_text=claim.claim_text,
+        matched_citation=citation_label,
+        evidence_passage=source.source_passage,
+        verdict=llm_result.verdict,
+        explanation=llm_result.explanation,
+        confidence=calibrated_confidence,
+        uncertainty_note=uncertainty_note,
+        needs_human_review=needs_review,
+        source_url=source.doi_url,
+        mismatch_flags=combined_flags,
+    )
 
 
 def build_verification_report(
