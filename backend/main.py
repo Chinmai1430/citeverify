@@ -1,6 +1,6 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,6 +17,11 @@ try:
         extract_claims_from_text,
         extract_document_title,
         extract_text_from_pdf,
+    )
+    from backend.services.report_exporter import (
+        build_export_filename,
+        export_report_to_markdown,
+        export_report_to_pdf_bytes,
     )
     from backend.services.retriever import retrieve_sources_batch
     from backend.services.verifier import (
@@ -35,6 +40,11 @@ except ImportError:
         extract_claims_from_text,
         extract_document_title,
         extract_text_from_pdf,
+    )
+    from services.report_exporter import (
+        build_export_filename,
+        export_report_to_markdown,
+        export_report_to_pdf_bytes,
     )
     from services.retriever import retrieve_sources_batch
     from services.verifier import (
@@ -57,17 +67,20 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 
 class SingleVerifyRequest(BaseModel):
     """Input payload to verify one claim against one retrieved source."""
+
     claim: ExtractedClaim
     source: RetrievedSource
 
 
 class BatchVerifyRequest(BaseModel):
     """Input payload to verify a list of claim-source pairs for a document."""
+
     document_title: str = "Untitled Academic Document"
     items: List[SingleVerifyRequest]
 
@@ -254,3 +267,28 @@ def verify_batch_endpoint(payload: BatchVerifyRequest):
     """Verifies multiple claims and returns a full claim-by-claim VerificationReport."""
     pairs = [(item.claim, item.source) for item in payload.items]
     return build_verification_report(payload.document_title, pairs)
+
+
+@app.post("/api/export")
+async def export_report_endpoint(
+    report: VerificationReport,
+    format: Literal["pdf", "markdown", "md"] = Query(default="pdf"),
+):
+    """Exports a VerificationReport as a downloadable PDF or Markdown audit report."""
+    normalized_format = format.lower()
+    if normalized_format == "pdf":
+        pdf_bytes = await run_in_threadpool(export_report_to_pdf_bytes, report)
+        filename = build_export_filename(report.document_title, "pdf")
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    markdown_text = await run_in_threadpool(export_report_to_markdown, report)
+    filename = build_export_filename(report.document_title, "md")
+    return Response(
+        content=markdown_text.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
