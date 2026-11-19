@@ -40,15 +40,20 @@ _ABBREVIATIONS = (
     "sec.",
 )
 
-# Standalone section heading lines that should not merge into body sentences
+# Standalone section heading lines (numeric, Roman numeral IEEE, or standard academic)
 _SECTION_HEADING_PATTERN = re.compile(
     r"^(?:"
-    r"\d+(?:\.\d+)*\.?\s+[A-Z][^\n.!?]{1,90}"
+    r"(?:\d+(?:\.\d+)*|[IVX]+)\.?\s+[A-Z][^\n.!?]{1,90}"
     r"|(?:abstract|introduction|background|methods?|methodology|"
     r"materials?\s+and\s+methods?|results?|discussion|conclusions?|"
     r"limitations?|acknowledgements?)\s*:?"
     r")$",
     re.IGNORECASE,
+)
+
+# Standalone page numbers or footer markers common in copy-pasted PDFs
+_PAGE_NOISE_PATTERN = re.compile(
+    r"(?im)^\s*(?:page\s+\d+(?:\s+of\s+\d+)?|[-–—]?\s*\d{1,3}\s*[-–—]?)\s*$"
 )
 
 # Phrases that signal factual findings, metrics, or conclusions needing evidence
@@ -68,9 +73,77 @@ _QUANTITATIVE_PATTERN = re.compile(
     r"(?i)(?:\b\d+(?:\.\d+)?\s*%|\bp\s*[<>=]\s*0?\.\d+|\b\d+(?:\.\d+)?\s*(?:x|fold|times|million|billion|thousand|mg|kg|km|hours?|days?|years?)\b)"
 )
 
+_LIGATURE_MAP = str.maketrans(
+    {
+        "\ufb00": "ff",
+        "\ufb01": "fi",
+        "\ufb02": "fl",
+        "\ufb03": "ffi",
+        "\ufb04": "ffl",
+        "\u00a0": " ",
+        "\u200b": "",
+        "\ufeff": "",
+        "\u00ad": "",
+    }
+)
+
+
+# Inputs: Raw PyMuPDF text blocks from a single page and the page width in points.
+# Outputs: Text blocks sorted in true reading order (supports both 1-column and 2-column IEEE/arXiv pages).
+def _sort_page_blocks_reading_order(
+    blocks: list[tuple], page_width: float
+) -> list[tuple]:
+    text_blocks = [b for b in blocks if b[6] == 0 and b[4].strip()]
+    if len(text_blocks) <= 1 or page_width <= 0:
+        return text_blocks
+
+    mid_x = page_width / 2.0
+    margin = 12.0
+
+    full_width: list[tuple] = []
+    narrow: list[tuple] = []
+    for block in text_blocks:
+        x0, x1 = block[0], block[2]
+        spans_mid = x0 < (mid_x - margin) and x1 > (mid_x + margin)
+        is_wide = (x1 - x0) > (page_width * 0.58)
+        if spans_mid or is_wide:
+            full_width.append(block)
+        else:
+            narrow.append(block)
+
+    # Only apply 2-column ordering when narrow blocks populate both left and right halves
+    has_left = any(((b[0] + b[2]) / 2.0) < mid_x for b in narrow)
+    has_right = any(((b[0] + b[2]) / 2.0) >= mid_x for b in narrow)
+    if not (has_left and has_right):
+        return sorted(text_blocks, key=lambda b: (round(b[1], 1), round(b[0], 1)))
+
+    full_width.sort(key=lambda b: (round(b[1], 1), round(b[0], 1)))
+    boundaries = [float("-inf")] + [b[1] for b in full_width] + [float("inf")]
+
+    ordered: list[tuple] = []
+    for idx in range(len(boundaries) - 1):
+        y_start, y_end = boundaries[idx], boundaries[idx + 1]
+        band = [b for b in narrow if y_start <= ((b[1] + b[3]) / 2.0) < y_end]
+
+        left_col = sorted(
+            (b for b in band if ((b[0] + b[2]) / 2.0) < mid_x),
+            key=lambda b: (round(b[1], 1), round(b[0], 1)),
+        )
+        right_col = sorted(
+            (b for b in band if ((b[0] + b[2]) / 2.0) >= mid_x),
+            key=lambda b: (round(b[1], 1), round(b[0], 1)),
+        )
+        ordered.extend(left_col)
+        ordered.extend(right_col)
+
+        if idx < len(full_width):
+            ordered.append(full_width[idx])
+
+    return ordered
+
 
 # Inputs: pdf_source as raw PDF bytes (from FastAPI UploadFile) or a local file path.
-# Outputs: Full plain-text string extracted block-by-block with preserved paragraph boundaries.
+# Outputs: Full plain-text string extracted in reading order with preserved paragraph boundaries.
 def extract_text_from_pdf(pdf_source: bytes | str | Path) -> str:
     if isinstance(pdf_source, bytes):
         if not pdf_source:
@@ -85,10 +158,8 @@ def extract_text_from_pdf(pdf_source: bytes | str | Path) -> str:
     pages_text: list[str] = []
     with doc_ctx as doc:
         for page in doc:
-            # Extract text blocks in visual reading order so headings stay separate from body text
-            blocks = sorted(
-                (b for b in page.get_text("blocks") if b[6] == 0 and b[4].strip()),
-                key=lambda b: (round(b[1], 1), round(b[0], 1)),
+            blocks = _sort_page_blocks_reading_order(
+                page.get_text("blocks"), page.rect.width
             )
             if blocks:
                 page_text = "\n\n".join(b[4].strip() for b in blocks)
@@ -101,14 +172,17 @@ def extract_text_from_pdf(pdf_source: bytes | str | Path) -> str:
 
 
 # Inputs: raw_text string directly from a PDF or user-pasted academic document.
-# Outputs: Cleaned string with normalized newlines, rejoined hyphenated words, and trimmed spacing.
+# Outputs: Cleaned string with ligatures fixed, page noise removed, and hyphenated wraps rejoined.
 def clean_extracted_text(raw_text: str) -> str:
     if not raw_text:
         return ""
 
-    text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"([A-Za-z])-\n([A-Za-z])", r"\1\2", text)
+    text = raw_text.translate(_LIGATURE_MAP)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _PAGE_NOISE_PATTERN.sub("", text)
+    text = re.sub(r"([A-Za-z])-\s*\n\s*([A-Za-z])", r"\1\2", text)
     text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -120,7 +194,7 @@ def split_body_and_references(text: str) -> tuple[str, str]:
         return "", ""
 
     heading_pattern = re.compile(
-        r"(?im)^\s*(?:\d+\.?\s+)?(references|bibliography|works\s+cited|literature\s+cited)\s*:?\s*$"
+        r"(?im)^\s*(?:(?:\d+|[IVX]+)\.?\s+)?(references|bibliography|works\s+cited|literature\s+cited)\s*:?\s*$"
     )
 
     matches = list(heading_pattern.finditer(text))
@@ -144,25 +218,39 @@ def extract_document_title(text: str) -> str:
 
 
 # Inputs: Main document body text (without the references section).
-# Outputs: List of individual cleaned sentences with headings removed and decimals kept intact.
+# Outputs: List of cleaned sentences with headings stripped and cross-column splits rejoined.
 def split_into_sentences(body_text: str) -> list[str]:
     if not body_text or not body_text.strip():
         return []
 
-    sentences: list[str] = []
-    paragraphs = re.split(r"\n\s*\n", body_text.strip())
+    raw_paragraphs = re.split(r"\n\s*\n", body_text.strip())
+    merged_paragraphs: list[str] = []
 
-    for paragraph in paragraphs:
-        # Strip leading standalone section headings (e.g., "Introduction" or "2. Methods")
+    for paragraph in raw_paragraphs:
         lines = [ln.strip() for ln in paragraph.splitlines() if ln.strip()]
         while lines and _SECTION_HEADING_PATTERN.fullmatch(lines[0]):
             lines.pop(0)
         if not lines:
             continue
 
-        # Join PDF line wraps inside the same paragraph into a single clean line
         merged = " ".join(lines).strip()
 
+        # Heal sentences split across 2-column or page breaks (previous block unfinished, next continues)
+        if (
+            merged_paragraphs
+            and not re.search(r"[.!?][\"')\]]*$", merged_paragraphs[-1])
+            and re.match(r"^[a-z(\[]", merged)
+        ):
+            prev = merged_paragraphs[-1]
+            if prev.endswith("-") and re.match(r"^[a-z]", merged):
+                merged_paragraphs[-1] = prev[:-1] + merged
+            else:
+                merged_paragraphs[-1] = f"{prev} {merged}"
+        else:
+            merged_paragraphs.append(merged)
+
+    sentences: list[str] = []
+    for merged in merged_paragraphs:
         # Skip standalone non-sentence blocks (banners, titles, author bylines, headings)
         if not re.search(r"[.!?][\"')\]]*$", merged):
             continue
