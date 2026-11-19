@@ -13,6 +13,7 @@ try:
     )
 except ImportError:
     from schemas import ExtractedClaim
+
     from services.citation_matcher import (
         detect_inline_citations,
         match_marker_to_reference,
@@ -39,6 +40,17 @@ _ABBREVIATIONS = (
     "sec.",
 )
 
+# Standalone section heading lines that should not merge into body sentences
+_SECTION_HEADING_PATTERN = re.compile(
+    r"^(?:"
+    r"\d+(?:\.\d+)*\.?\s+[A-Z][^\n.!?]{1,90}"
+    r"|(?:abstract|introduction|background|methods?|methodology|"
+    r"materials?\s+and\s+methods?|results?|discussion|conclusions?|"
+    r"limitations?|acknowledgements?)\s*:?"
+    r")$",
+    re.IGNORECASE,
+)
+
 # Phrases that signal factual findings, metrics, or conclusions needing evidence
 _CLAIM_SIGNAL_PATTERN = re.compile(
     r"(?i)\b("
@@ -58,7 +70,7 @@ _QUANTITATIVE_PATTERN = re.compile(
 
 
 # Inputs: pdf_source as raw PDF bytes (from FastAPI UploadFile) or a local file path.
-# Outputs: Full plain-text string extracted page-by-page from the PDF document.
+# Outputs: Full plain-text string extracted block-by-block with preserved paragraph boundaries.
 def extract_text_from_pdf(pdf_source: bytes | str | Path) -> str:
     if isinstance(pdf_source, bytes):
         if not pdf_source:
@@ -70,14 +82,19 @@ def extract_text_from_pdf(pdf_source: bytes | str | Path) -> str:
             raise FileNotFoundError(f"PDF file not found: {file_path}")
         doc_ctx = pymupdf.open(file_path)
 
-    pages_text = []
+    pages_text: list[str] = []
     with doc_ctx as doc:
         for page in doc:
-            page_text = page.get_text("text")
-            if page_text:
+            # Extract text blocks in visual reading order so headings stay separate from body text
+            blocks = sorted(
+                (b for b in page.get_text("blocks") if b[6] == 0 and b[4].strip()),
+                key=lambda b: (round(b[1], 1), round(b[0], 1)),
+            )
+            if blocks:
+                page_text = "\n\n".join(b[4].strip() for b in blocks)
                 pages_text.append(page_text)
 
-    combined_text = "\n".join(pages_text).strip()
+    combined_text = "\n\n".join(pages_text).strip()
     if not combined_text:
         raise ValueError("No readable text could be extracted from the PDF.")
     return combined_text
@@ -127,7 +144,7 @@ def extract_document_title(text: str) -> str:
 
 
 # Inputs: Main document body text (without the references section).
-# Outputs: List of individual cleaned sentences with abbreviations and decimals kept intact.
+# Outputs: List of individual cleaned sentences with headings removed and decimals kept intact.
 def split_into_sentences(body_text: str) -> list[str]:
     if not body_text or not body_text.strip():
         return []
@@ -136,9 +153,18 @@ def split_into_sentences(body_text: str) -> list[str]:
     paragraphs = re.split(r"\n\s*\n", body_text.strip())
 
     for paragraph in paragraphs:
+        # Strip leading standalone section headings (e.g., "Introduction" or "2. Methods")
+        lines = [ln.strip() for ln in paragraph.splitlines() if ln.strip()]
+        while lines and _SECTION_HEADING_PATTERN.fullmatch(lines[0]):
+            lines.pop(0)
+        if not lines:
+            continue
+
         # Join PDF line wraps inside the same paragraph into a single clean line
-        merged = re.sub(r"\s*\n\s*", " ", paragraph).strip()
-        if not merged:
+        merged = " ".join(lines).strip()
+
+        # Skip standalone non-sentence blocks (banners, titles, author bylines, headings)
+        if not re.search(r"[.!?][\"')\]]*$", merged):
             continue
 
         # Temporarily shield dots inside common academic abbreviations

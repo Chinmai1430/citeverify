@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 import pymupdf
 
@@ -96,6 +97,33 @@ class TestDocumentParser(unittest.TestCase):
 
         self.assertEqual(claims[1].inline_marker, "Doe (2023)")
         self.assertIn("Cool Roof Performance", claims[1].raw_reference)
+
+    # Inputs: The 2-page demo_paper.pdf stored in backend/tests/sample_papers/.
+    # Outputs: Verifies all 5 planted claims and their [1]-[5] references extract cleanly.
+    def test_demo_paper_pdf_extraction(self):
+        demo_pdf = Path(__file__).parent / "sample_papers" / "demo_paper.pdf"
+        self.assertTrue(demo_pdf.exists(), f"Missing demo PDF at {demo_pdf}")
+
+        claims = extract_claims_from_pdf(demo_pdf)
+
+        self.assertEqual(len(claims), 5)
+        self.assertEqual([c.claim_id for c in claims], [1, 2, 3, 4, 5])
+        self.assertEqual(
+            [c.inline_marker for c in claims],
+            ["[1]", "[2]", "[3]", "[4]", "[5]"],
+        )
+
+        expected_pairs = [
+            ("97.5% sensitivity", "Gulshan"),
+            ("30 countries", "McKinney"),
+            ("62.4%", "Horby"),
+            ("74.2%", "Kowalski"),
+            ("hydroxychloroquine", "Mehra"),
+        ]
+        for claim, (claim_snippet, ref_author) in zip(claims, expected_pairs, strict=True):
+            self.assertIn(claim_snippet, claim.claim_text)
+            self.assertIsNotNone(claim.raw_reference)
+            self.assertIn(ref_author, claim.raw_reference)
 
 
 if __name__ == "__main__":

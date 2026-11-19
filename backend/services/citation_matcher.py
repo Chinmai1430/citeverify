@@ -1,5 +1,49 @@
 import re
 
+# Common non-author nouns that can precede a year in titles/headers (e.g., "Review (2026)")
+_NON_AUTHOR_WORDS = {
+    "abstract",
+    "analysis",
+    "annual",
+    "appendix",
+    "audit",
+    "benchmark",
+    "bulletin",
+    "chapter",
+    "conference",
+    "corpus",
+    "data",
+    "dataset",
+    "edition",
+    "figure",
+    "guideline",
+    "guidelines",
+    "handbook",
+    "issue",
+    "journal",
+    "manual",
+    "paper",
+    "protocol",
+    "release",
+    "report",
+    "review",
+    "section",
+    "series",
+    "standard",
+    "study",
+    "summary",
+    "survey",
+    "symposium",
+    "system",
+    "table",
+    "trial",
+    "update",
+    "version",
+    "volume",
+    "workshop",
+    "year",
+}
+
 
 # Inputs: A single reference entry string (e.g., "[1] Smith, J. (2024). Title...").
 # Outputs: Optional normalized lookup key in "surname_year" format (e.g., "smith_2024").
@@ -97,8 +141,15 @@ def detect_inline_citations(sentence: str) -> list[str]:
         for match in re.finditer(pattern, sentence):
             marker = match.group(0).strip()
             # Skip parenthetical matches that are strictly a year with no author inside
-            if marker.startswith("(") and re.fullmatch(r"\(\s*(?:19|20)\d{2}[a-z]?\s*\)", marker):
+            if marker.startswith("(") and re.fullmatch(
+                r"\(\s*(?:19|20)\d{2}[a-z]?\s*\)", marker
+            ):
                 continue
+            # Skip false-positive narrative matches like "Review (2026)" or "Report (2024)"
+            if not marker.startswith(("[", "(")):
+                leading_word = marker.split()[0].lower()
+                if leading_word in _NON_AUTHOR_WORDS:
+                    continue
             found.append((match.start(), marker))
 
     # Sort by position in sentence and deduplicate while preserving order
@@ -150,7 +201,9 @@ def match_marker_to_reference(
 
         # Extract candidate author surname(s) before the year
         before_year = segment[: year_match.start()]
-        before_year = re.sub(r"(?i)\b(see|e\.g\.|cf\.|also|et\s+al\.?|and)\b", " ", before_year)
+        before_year = re.sub(
+            r"(?i)\b(see|e\.g\.|cf\.|also|et\s+al\.?|and)\b", " ", before_year
+        )
         author_tokens = re.findall(r"[A-Z][A-Za-z'\-]+", before_year)
         if not author_tokens:
             continue
