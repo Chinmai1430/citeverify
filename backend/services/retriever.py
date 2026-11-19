@@ -317,3 +317,185 @@ def fetch_from_europe_pmc(
         }
     except (httpx.HTTPError, ValueError):
         return None
+
+STOP_WORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "their",
+    "have", "been", "were", "also", "using", "based", "study", "paper",
+    "results", "show", "which", "about", "more", "than", "between",
+}
+
+
+# Input: any text string (or None) from a claim, title, or reference.
+# Output: set of lowercase meaningful keywords (4+ letters, excluding stop words).
+def extract_meaningful_tokens(text: Optional[str]) -> set:
+    if not text:
+        return set()
+    words = re.findall(r"[a-z]{4,}", text.lower())
+    return {w for w in words if w not in STOP_WORDS}
+
+
+# Input: primary paper dict and an optional secondary paper dict from another API.
+# Output: merged dict filling missing fields and combining retraction/open-access flags.
+def merge_paper_records(
+    primary: Dict[str, Any], secondary: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    if not secondary:
+        return primary
+    merged = dict(primary)
+    for field in ("title", "year", "doi", "url", "abstract"):
+        if not merged.get(field) and secondary.get(field):
+            merged[field] = secondary[field]
+    if not merged.get("authors") and secondary.get("authors"):
+        merged["authors"] = secondary["authors"]
+    merged["is_retracted"] = bool(
+        merged.get("is_retracted") or secondary.get("is_retracted")
+    )
+    merged["is_open_access"] = bool(
+        merged.get("is_open_access") or secondary.get("is_open_access")
+    )
+    return merged
+
+
+# Input: original ExtractedClaim, retrieved paper dict, cited DOI, and cited year.
+# Output: list of clear warning flags for mismatches, retractions, or paywall limits.
+def detect_reference_mismatches(
+    claim: ExtractedClaim,
+    paper: Dict[str, Any],
+    cited_doi: Optional[str],
+    cited_year: Optional[int],
+) -> List[str]:
+    flags: List[str] = []
+
+    if paper.get("is_retracted"):
+        flags.append("RETRACTED_SOURCE: original publication is retracted or withdrawn")
+
+    paper_doi = paper.get("doi")
+    if cited_doi and paper_doi and cited_doi.lower() != paper_doi.lower():
+        flags.append("DOI_MISMATCH: cited DOI does not match retrieved publication")
+
+    paper_year = paper.get("year")
+    if cited_year and paper_year and cited_year != paper_year:
+        flags.append(
+            f"YEAR_MISMATCH: cited {cited_year}, original published in {paper_year}"
+        )
+
+    if claim.inline_marker and paper.get("authors"):
+        marker_words = {
+            w.lower()
+            for w in re.findall(r"[A-Za-z]{3,}", claim.inline_marker)
+            if w.lower() not in {"and", "see", "ref", "fig", "tab"}
+        }
+        author_surnames = {
+            re.sub(r"[^a-z]", "", name.split()[-1].lower())
+            for name in paper["authors"]
+            if name.strip()
+        }
+        if marker_words and author_surnames and not (marker_words & author_surnames):
+            flags.append(
+                "AUTHOR_MISMATCH: inline citation author not found in source authors"
+            )
+
+    clean_ref = clean_search_query(claim.raw_reference)
+    ref_tokens = extract_meaningful_tokens(clean_ref)
+    title_tokens = extract_meaningful_tokens(paper.get("title"))
+    if len(ref_tokens) >= 3 and len(title_tokens) >= 2:
+        overlap_ratio = len(title_tokens & ref_tokens) / len(title_tokens)
+        if overlap_ratio < 0.35:
+            flags.append(
+                "TITLE_MISMATCH: cited reference text does not match retrieved title"
+            )
+
+    claim_tokens = extract_meaningful_tokens(claim.claim_text)
+    source_text = f"{paper.get('title') or ''} {paper.get('abstract') or ''}"
+    source_tokens = extract_meaningful_tokens(source_text)
+    if len(claim_tokens) >= 3 and len(source_tokens) >= 3:
+        if not (claim_tokens & source_tokens):
+            flags.append(
+                "POTENTIALLY_UNRELATED_SOURCE: claim terms absent from source title/abstract"
+            )
+
+    if paper.get("abstract"):
+        if not paper.get("is_open_access"):
+            flags.append("PAYWALLED_ABSTRACT_ONLY_NEEDS_HUMAN_REVIEW")
+    else:
+        flags.append("METADATA_ONLY_NO_ABSTRACT_NEEDS_HUMAN_REVIEW")
+
+    return flags
+
+
+# Input: ExtractedClaim containing claim text, inline citation, and raw reference.
+# Output: RetrievedSource schema with metadata, abstract, scope, and mismatch flags.
+def retrieve_source(claim: ExtractedClaim) -> RetrievedSource:
+    if not claim.raw_reference or not claim.raw_reference.strip():
+        return RetrievedSource(
+            found=False,
+            evidence_scope="NONE",
+            mismatch_flags=["MISSING_REFERENCE: no citation provided for this claim"],
+        )
+
+    cited_doi = extract_doi(claim.raw_reference)
+    cited_arxiv_id = extract_arxiv_id(claim.raw_reference)
+    cited_year = extract_year(claim.raw_reference)
+    search_query = clean_search_query(claim.raw_reference, fallback_text=claim.claim_text)
+
+    paper: Optional[Dict[str, Any]] = None
+
+    with httpx.Client(
+        headers=REQUEST_HEADERS, timeout=DEFAULT_TIMEOUT, follow_redirects=True
+    ) as client:
+        if cited_arxiv_id:
+            paper = fetch_from_arxiv(client, arxiv_id=cited_arxiv_id)
+
+        if not paper and cited_doi:
+            paper = fetch_from_openalex(client, doi=cited_doi)
+            crossref_hit = fetch_from_crossref(client, doi=cited_doi)
+            if paper and crossref_hit:
+                paper = merge_paper_records(paper, crossref_hit)
+            elif not paper:
+                paper = crossref_hit
+            if not paper or not paper.get("abstract"):
+                epmc_hit = fetch_from_europe_pmc(client, doi=cited_doi)
+                paper = merge_paper_records(paper, epmc_hit) if paper else epmc_hit
+
+        if not paper and search_query:
+            for fetcher in (
+                fetch_from_openalex,
+                fetch_from_crossref,
+                fetch_from_arxiv,
+                fetch_from_europe_pmc,
+            ):
+                paper = fetcher(client, query=search_query)
+                if paper:
+                    break
+
+        if paper and not paper.get("abstract") and paper.get("doi"):
+            enrichment = fetch_from_europe_pmc(client, doi=paper["doi"])
+            paper = merge_paper_records(paper, enrichment)
+
+    if not paper:
+        return RetrievedSource(
+            found=False,
+            evidence_scope="NONE",
+            mismatch_flags=["UNVERIFIABLE_REFERENCE: source not found in scholarly APIs"],
+        )
+
+    evidence_scope = "ABSTRACT_ONLY" if paper.get("abstract") else "METADATA_ONLY"
+    mismatch_flags = detect_reference_mismatches(claim, paper, cited_doi, cited_year)
+
+    return RetrievedSource(
+        found=True,
+        title=paper.get("title"),
+        authors=paper.get("authors") or [],
+        year=paper.get("year"),
+        doi_url=paper.get("url"),
+        is_retracted=bool(paper.get("is_retracted", False)),
+        source_passage=paper.get("abstract"),
+        evidence_scope=evidence_scope,
+        mismatch_flags=mismatch_flags,
+    )
+
+
+# Input: list of ExtractedClaim objects produced by the document parser.
+# Output: list of corresponding RetrievedSource objects in the same order.
+def retrieve_sources_batch(claims: List[ExtractedClaim]) -> List[RetrievedSource]:
+    return [retrieve_source(claim) for claim in claims]
