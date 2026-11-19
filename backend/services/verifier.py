@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 from collections import Counter
 from typing import List, Optional, Tuple
 
@@ -27,14 +28,18 @@ except ImportError:
         VerificationReport,
     )
 
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 load_dotenv()
 
-PRIMARY_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
-FALLBACK_GEMINI_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+PRIMARY_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+FALLBACK_GEMINI_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
+SECONDARY_FALLBACK_MODEL = os.getenv("GEMINI_SECONDARY_FALLBACK_MODEL", "gemini-3.8-flash")
+
 RETRY_SCHEDULE = [
-    (PRIMARY_GEMINI_MODEL, 1.0),
+    (PRIMARY_GEMINI_MODEL, 1.5),
     (PRIMARY_GEMINI_MODEL, 2.0),
-    (FALLBACK_GEMINI_MODEL, 0.0),
+    (FALLBACK_GEMINI_MODEL, 1.5),
+    (SECONDARY_FALLBACK_MODEL, 0.0),
 ]
 
 
@@ -191,8 +196,11 @@ HONEST UNCERTAINTY RULES:
     client = genai.Client(api_key=api_key)
     llm_result: Optional[_LLMVerdictOutput] = None
     last_exc: Optional[Exception] = None
+    blocked_models = set()
 
     for attempt_idx, (model_name, retry_delay) in enumerate(RETRY_SCHEDULE, start=1):
+        if model_name in blocked_models:
+            continue
         try:
             response = client.models.generate_content(
                 model=model_name,
@@ -206,14 +214,22 @@ HONEST UNCERTAINTY RULES:
             break
         except Exception as exc:
             last_exc = exc
+            status_code = getattr(exc, "code", None)
             print(
                 f"Gemini API error (attempt {attempt_idx}/{len(RETRY_SCHEDULE)}, "
-                f"model={model_name}): {exc}"
+                f"model={model_name}, code={status_code}): {exc}"
             )
+            # Don't waste retries on the same model if it returned a hard 4xx (not 429)
+            if status_code in (400, 403, 404):
+                blocked_models.add(model_name)
+                continue
             if retry_delay > 0:
                 time.sleep(retry_delay)
 
     if llm_result is None:
+        err_name = type(last_exc).__name__ if last_exc else "UnknownError"
+        err_code = getattr(last_exc, "code", None)
+        code_suffix = f" {err_code}" if err_code else ""
         return ClaimVerificationResult(
             claim_id=claim.claim_id,
             claim_text=claim.claim_text,
@@ -223,8 +239,7 @@ HONEST UNCERTAINTY RULES:
             explanation="Automated evidence comparison encountered a temporary API error.",
             confidence=ConfidenceLevel.LOW,
             uncertainty_note=(
-                f"Fallback triggered ({type(last_exc).__name__ if last_exc else 'UnknownError'}). "
-                "Manual review required."
+                f"Fallback triggered ({err_name}{code_suffix}). Manual review required."
             ),
             needs_human_review=True,
             source_url=source.doi_url,
