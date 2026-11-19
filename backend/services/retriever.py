@@ -1,3 +1,4 @@
+import os
 import re
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
@@ -13,6 +14,8 @@ OPENALEX_API_URL = "https://api.openalex.org/works"
 CROSSREF_API_URL = "https://api.crossref.org/works"
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 EUROPE_PMC_API_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+UNPAYWALL_API_URL = "https://api.unpaywall.org/v2"
+UNPAYWALL_EMAIL = os.getenv("UNPAYWALL_EMAIL", "citeverify@sapthahacks.edu")
 DEFAULT_TIMEOUT = 10.0
 REQUEST_HEADERS = {
     "User-Agent": "CiteVerify/1.0 (mailto:citeverify@sapthahacks.edu)"
@@ -318,6 +321,39 @@ def fetch_from_europe_pmc(
     except (httpx.HTTPError, ValueError):
         return None
 
+
+# Input: active httpx client and a publication DOI string.
+# Output: Unpaywall open-access status dict with best legal PDF URL, or None.
+def fetch_from_unpaywall(
+    client: httpx.Client,
+    doi: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if not doi:
+        return None
+    try:
+        resp = client.get(
+            f"{UNPAYWALL_API_URL}/{doi}",
+            params={"email": UNPAYWALL_EMAIL},
+        )
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        best_oa = data.get("best_oa_location") or {}
+        oa_url = (
+            best_oa.get("url_for_pdf")
+            or best_oa.get("url_for_landing_page")
+            or best_oa.get("url")
+        )
+        return {
+            "is_open_access": bool(data.get("is_oa", False)),
+            "oa_url": oa_url,
+            "oa_status": data.get("oa_status"),
+        }
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
 STOP_WORDS = {
     "the", "and", "for", "with", "that", "this", "from", "into", "their",
     "have", "been", "were", "also", "using", "based", "study", "paper",
@@ -471,6 +507,13 @@ def retrieve_source(claim: ExtractedClaim) -> RetrievedSource:
         if paper and not paper.get("abstract") and paper.get("doi"):
             enrichment = fetch_from_europe_pmc(client, doi=paper["doi"])
             paper = merge_paper_records(paper, enrichment)
+
+        if paper and paper.get("doi"):
+            unpaywall_hit = fetch_from_unpaywall(client, doi=paper["doi"])
+            if unpaywall_hit is not None:
+                paper["is_open_access"] = unpaywall_hit["is_open_access"]
+                if unpaywall_hit["is_open_access"] and unpaywall_hit.get("oa_url"):
+                    paper["url"] = unpaywall_hit["oa_url"]
 
     if not paper:
         return RetrievedSource(
