@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useCallback,
+} from "react";
 import {
   ShieldCheck,
   FileText,
@@ -40,20 +46,20 @@ import {
   Plus,
   Server,
   Filter,
-} from 'lucide-react';
+} from "lucide-react";
 
 // ============================================================================
 // 1. Strict Backend Contract Types (Mirrors backend/schemas.py Exactly)
 // ============================================================================
 
 export type ClaimStatus =
-  | 'SUPPORTED'
-  | 'PARTIALLY_SUPPORTED'
-  | 'UNSUPPORTED'
-  | 'CONTRADICTORY'
-  | 'POTENTIALLY_OUTDATED';
+  | "SUPPORTED"
+  | "PARTIALLY_SUPPORTED"
+  | "UNSUPPORTED"
+  | "CONTRADICTORY"
+  | "POTENTIALLY_OUTDATED";
 
-export type ConfidenceLevel = 'HIGH' | 'MEDIUM' | 'LOW';
+export type ConfidenceLevel = "HIGH" | "MEDIUM" | "LOW";
 
 export interface ClaimVerificationResult {
   claim_id: number;
@@ -81,15 +87,15 @@ export interface VerificationReport {
 // 2. Frontend Application State Types
 // ============================================================================
 
-type HealthState = 'checking' | 'online' | 'offline';
-type InputMode = 'pdf' | 'text';
-type VerdictFilter = 'ALL' | ClaimStatus;
-type NavView = 'verify' | 'report' | 'history' | 'settings';
+type HealthState = "checking" | "online" | "offline";
+type InputMode = "pdf" | "text";
+type VerdictFilter = "ALL" | ClaimStatus;
+type NavView = "verify" | "report" | "history" | "settings";
 
 interface AuthSession {
   email: string;
   displayName: string;
-  provider: 'email' | 'google';
+  provider: "email" | "google";
 }
 
 interface SessionHistoryEntry {
@@ -112,37 +118,37 @@ interface HealthCheckDiagnostics {
 // 3. Semantic Design Tokens & Constants (Zero Hardcoded Data)
 // ============================================================================
 
-const DEFAULT_API_URL = 'https://citeverify-api.onrender.com';
-const HISTORY_STORAGE_KEY = 'citeverify_session_history';
+const DEFAULT_API_URL = "https://citeverify-api.onrender.com";
+const HISTORY_STORAGE_KEY = "citeverify_session_history";
 
 const ALL_STATUSES: ClaimStatus[] = [
-  'SUPPORTED',
-  'PARTIALLY_SUPPORTED',
-  'UNSUPPORTED',
-  'CONTRADICTORY',
-  'POTENTIALLY_OUTDATED',
+  "SUPPORTED",
+  "PARTIALLY_SUPPORTED",
+  "UNSUPPORTED",
+  "CONTRADICTORY",
+  "POTENTIALLY_OUTDATED",
 ];
 
 const VERIFICATION_PIPELINE_STEPS = [
   {
     id: 0,
-    title: 'Parsing Claims',
-    detail: 'Extracting assertions, inline markers, and bibliography entries',
+    title: "Parsing Claims",
+    detail: "Extracting assertions, inline markers, and bibliography entries",
   },
   {
     id: 1,
-    title: 'Retrieving Sources',
-    detail: 'Resolving DOIs, abstracts, and metadata from academic indices',
+    title: "Retrieving Sources",
+    detail: "Resolving DOIs, abstracts, and metadata from academic indices",
   },
   {
     id: 2,
-    title: 'Cross-Checking Evidence',
-    detail: 'Evaluating semantic alignment, retractions, and temporal validity',
+    title: "Cross-Checking Evidence",
+    detail: "Evaluating semantic alignment, retractions, and temporal validity",
   },
   {
     id: 3,
-    title: 'Compiling Report',
-    detail: 'Assigning verdicts, confidence scores, and human-review flags',
+    title: "Compiling Report",
+    detail: "Assigning verdicts, confidence scores, and human-review flags",
   },
 ] as const;
 
@@ -159,69 +165,72 @@ interface StatusMeta {
 
 const STATUS_CONFIG: Record<ClaimStatus, StatusMeta> = {
   SUPPORTED: {
-    label: 'Supported',
-    shortLabel: 'Supported',
-    badgeClass: 'border-emerald-500/30 bg-emerald-500/12 text-emerald-300',
-    dotClass: 'bg-emerald-400',
-    barClass: 'bg-emerald-400',
-    borderAccent: 'border-l-emerald-400/80',
-    cardGlow: 'hover:border-emerald-500/30',
+    label: "Supported",
+    shortLabel: "Supported",
+    badgeClass: "border-emerald-500/30 bg-emerald-500/12 text-emerald-300",
+    dotClass: "bg-emerald-400",
+    barClass: "bg-emerald-400",
+    borderAccent: "border-l-emerald-400/80",
+    cardGlow: "hover:border-emerald-500/30",
     icon: CheckCircle2,
   },
   PARTIALLY_SUPPORTED: {
-    label: 'Partially Supported',
-    shortLabel: 'Partial',
-    badgeClass: 'border-amber-500/30 bg-amber-500/12 text-amber-300',
-    dotClass: 'bg-amber-400',
-    barClass: 'bg-amber-400',
-    borderAccent: 'border-l-amber-400/80',
-    cardGlow: 'hover:border-amber-500/30',
+    label: "Partially Supported",
+    shortLabel: "Partial",
+    badgeClass: "border-amber-500/30 bg-amber-500/12 text-amber-300",
+    dotClass: "bg-amber-400",
+    barClass: "bg-amber-400",
+    borderAccent: "border-l-amber-400/80",
+    cardGlow: "hover:border-amber-500/30",
     icon: HelpCircle,
   },
   UNSUPPORTED: {
-    label: 'Unsupported',
-    shortLabel: 'Unsupported',
-    badgeClass: 'border-slate-500/35 bg-slate-500/12 text-slate-300',
-    dotClass: 'bg-slate-400',
-    barClass: 'bg-slate-400',
-    borderAccent: 'border-l-slate-400/75',
-    cardGlow: 'hover:border-slate-400/30',
+    label: "Unsupported",
+    shortLabel: "Unsupported",
+    badgeClass: "border-slate-500/35 bg-slate-500/12 text-slate-300",
+    dotClass: "bg-slate-400",
+    barClass: "bg-slate-400",
+    borderAccent: "border-l-slate-400/75",
+    cardGlow: "hover:border-slate-400/30",
     icon: AlertCircle,
   },
   CONTRADICTORY: {
-    label: 'Contradictory',
-    shortLabel: 'Contradictory',
-    badgeClass: 'border-rose-500/35 bg-rose-500/12 text-rose-300',
-    dotClass: 'bg-rose-400',
-    barClass: 'bg-rose-400',
-    borderAccent: 'border-l-rose-400/80',
-    cardGlow: 'hover:border-rose-500/30',
+    label: "Contradictory",
+    shortLabel: "Contradictory",
+    badgeClass: "border-rose-500/35 bg-rose-500/12 text-rose-300",
+    dotClass: "bg-rose-400",
+    barClass: "bg-rose-400",
+    borderAccent: "border-l-rose-400/80",
+    cardGlow: "hover:border-rose-500/30",
     icon: XCircle,
   },
   POTENTIALLY_OUTDATED: {
-    label: 'Potentially Outdated',
-    shortLabel: 'Outdated',
-    badgeClass: 'border-orange-500/35 bg-orange-500/12 text-orange-300',
-    dotClass: 'bg-orange-400',
-    barClass: 'bg-gradient-to-r from-violet-400 to-orange-400',
-    borderAccent: 'border-l-orange-400/80',
-    cardGlow: 'hover:border-orange-500/30',
+    label: "Potentially Outdated",
+    shortLabel: "Outdated",
+    badgeClass: "border-orange-500/35 bg-orange-500/12 text-orange-300",
+    dotClass: "bg-orange-400",
+    barClass: "bg-gradient-to-r from-violet-400 to-orange-400",
+    borderAccent: "border-l-orange-400/80",
+    cardGlow: "hover:border-orange-500/30",
     icon: Clock,
   },
 };
 
-const CONFIDENCE_CONFIG: Record<ConfidenceLevel, { label: string; className: string }> = {
+const CONFIDENCE_CONFIG: Record<
+  ConfidenceLevel,
+  { label: string; className: string }
+> = {
   HIGH: {
-    label: 'High Confidence',
-    className: 'border-cyan-400/30 bg-cyan-400/10 text-cyan-200',
+    label: "High Confidence",
+    className: "border-cyan-400/30 bg-cyan-400/10 text-cyan-200",
   },
   MEDIUM: {
-    label: 'Medium Confidence',
-    className: 'border-violet-400/30 bg-violet-400/12 text-violet-200',
+    label: "Medium Confidence",
+    className: "border-violet-400/30 bg-violet-400/12 text-violet-200",
   },
   LOW: {
-    label: 'Low Confidence',
-    className: 'border-slate-500/30 bg-slate-500/10 text-slate-300',
+    label: "Low Confidence",
+    className: "border-slate-500/30 bg-slate-500/10 text-slate-300",
   },
 };
 
@@ -234,10 +243,12 @@ const CONFIDENCE_CONFIG: Record<ConfidenceLevel, { label: string; className: str
  */
 function resolveEnvApiUrl(): string {
   try {
-    const envObj = (import.meta as unknown as { env?: Record<string, string | undefined> })?.env;
+    const envObj = (
+      import.meta as unknown as { env?: Record<string, string | undefined> }
+    )?.env;
     const raw = envObj?.VITE_API_URL;
-    if (typeof raw === 'string' && raw.trim().length > 0) {
-      return raw.trim().replace(/\/+$/, '');
+    if (typeof raw === "string" && raw.trim().length > 0) {
+      return raw.trim().replace(/\/+$/, "");
     }
   } catch {
     // Fallback cleanly when import.meta.env is unavailable
@@ -249,42 +260,53 @@ function resolveEnvApiUrl(): string {
  * Normalizes a live /api/verify JSON payload strictly against VerificationReport.
  */
 function normalizeReport(raw: unknown): VerificationReport {
-  const data = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const data = (raw && typeof raw === "object" ? raw : {}) as Record<
+    string,
+    unknown
+  >;
   const rawResults = Array.isArray(data.results) ? data.results : [];
 
   const results: ClaimVerificationResult[] = rawResults.map((entry, idx) => {
-    const r = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
-    const rawVerdict = String(r.verdict ?? 'UNSUPPORTED').toUpperCase();
+    const r = (entry && typeof entry === "object" ? entry : {}) as Record<
+      string,
+      unknown
+    >;
+    const rawVerdict = String(r.verdict ?? "UNSUPPORTED").toUpperCase();
     const verdict: ClaimStatus = (ALL_STATUSES as string[]).includes(rawVerdict)
       ? (rawVerdict as ClaimStatus)
-      : 'UNSUPPORTED';
+      : "UNSUPPORTED";
 
-    const rawConfidence = String(r.confidence ?? 'LOW').toUpperCase();
+    const rawConfidence = String(r.confidence ?? "LOW").toUpperCase();
     const confidence: ConfidenceLevel =
-      rawConfidence === 'HIGH' || rawConfidence === 'MEDIUM' || rawConfidence === 'LOW'
+      rawConfidence === "HIGH" ||
+      rawConfidence === "MEDIUM" ||
+      rawConfidence === "LOW"
         ? rawConfidence
-        : 'LOW';
+        : "LOW";
 
     return {
-      claim_id: typeof r.claim_id === 'number' ? r.claim_id : idx + 1,
-      claim_text: typeof r.claim_text === 'string' ? r.claim_text : '',
-      matched_citation: typeof r.matched_citation === 'string' ? r.matched_citation : null,
-      evidence_passage: typeof r.evidence_passage === 'string' ? r.evidence_passage : null,
+      claim_id: typeof r.claim_id === "number" ? r.claim_id : idx + 1,
+      claim_text: typeof r.claim_text === "string" ? r.claim_text : "",
+      matched_citation:
+        typeof r.matched_citation === "string" ? r.matched_citation : null,
+      evidence_passage:
+        typeof r.evidence_passage === "string" ? r.evidence_passage : null,
       verdict,
-      explanation: typeof r.explanation === 'string' ? r.explanation : '',
+      explanation: typeof r.explanation === "string" ? r.explanation : "",
       confidence,
-      uncertainty_note: typeof r.uncertainty_note === 'string' ? r.uncertainty_note : '',
+      uncertainty_note:
+        typeof r.uncertainty_note === "string" ? r.uncertainty_note : "",
       needs_human_review:
-        typeof r.needs_human_review === 'boolean' ? r.needs_human_review : true,
-      source_url: typeof r.source_url === 'string' ? r.source_url : null,
+        typeof r.needs_human_review === "boolean" ? r.needs_human_review : true,
+      source_url: typeof r.source_url === "string" ? r.source_url : null,
       mismatch_flags: Array.isArray(r.mismatch_flags)
-        ? r.mismatch_flags.filter((f): f is string => typeof f === 'string')
+        ? r.mismatch_flags.filter((f): f is string => typeof f === "string")
         : [],
     };
   });
 
   const rawSummary =
-    data.summary_counts && typeof data.summary_counts === 'object'
+    data.summary_counts && typeof data.summary_counts === "object"
       ? (data.summary_counts as Record<string, unknown>)
       : {};
 
@@ -297,15 +319,19 @@ function normalizeReport(raw: unknown): VerificationReport {
   }
 
   const limitations = Array.isArray(data.limitations)
-    ? data.limitations.filter((l): l is string => typeof l === 'string')
+    ? data.limitations.filter((l): l is string => typeof l === "string")
     : [];
 
   return {
     document_title:
-      typeof data.document_title === 'string' && data.document_title.trim().length > 0
+      typeof data.document_title === "string" &&
+      data.document_title.trim().length > 0
         ? data.document_title
-        : 'Untitled Research Document',
-    total_claims: typeof data.total_claims === 'number' ? data.total_claims : results.length,
+        : "Untitled Research Document",
+    total_claims:
+      typeof data.total_claims === "number"
+        ? data.total_claims
+        : results.length,
     summary_counts,
     results,
     limitations,
@@ -315,7 +341,9 @@ function normalizeReport(raw: unknown): VerificationReport {
 /**
  * Computes normalized counts across all 5 ClaimStatus buckets from a report.
  */
-function computeStatusCounts(report: VerificationReport): Record<ClaimStatus, number> {
+function computeStatusCounts(
+  report: VerificationReport,
+): Record<ClaimStatus, number> {
   const counts: Record<ClaimStatus, number> = {
     SUPPORTED: 0,
     PARTIALLY_SUPPORTED: 0,
@@ -348,9 +376,13 @@ function loadSessionHistory(): SessionHistoryEntry[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is SessionHistoryEntry =>
-        Boolean(item && typeof item.id === 'string' && item.report && Array.isArray(item.report.results))
+    return parsed.filter((item): item is SessionHistoryEntry =>
+      Boolean(
+        item &&
+        typeof item.id === "string" &&
+        item.report &&
+        Array.isArray(item.report.results),
+      ),
     );
   } catch {
     return [];
@@ -366,9 +398,9 @@ function saveSessionHistory(entries: SessionHistoryEntry[]): void {
 }
 
 function deriveDisplayName(email: string): string {
-  const localPart = email.split('@')[0] || 'Researcher';
+  const localPart = email.split("@")[0] || "Researcher";
   return localPart
-    .replace(/[._-]+/g, ' ')
+    .replace(/[._-]+/g, " ")
     .replace(/\b\w/g, (ch) => ch.toUpperCase())
     .trim();
 }
@@ -382,10 +414,10 @@ function formatFileSize(bytes: number): string {
 function formatTimestamp(iso: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
     });
   } catch {
     return iso;
@@ -396,15 +428,17 @@ function formatTimestamp(iso: string): string {
 // 5. Built-In Icon Branding & Official Google "G" SVG (Zero External Images)
 // ============================================================================
 
-const BrandBadge: React.FC<{ size?: 'sm' | 'md' | 'lg' }> = ({ size = 'md' }) => {
+const BrandBadge: React.FC<{ size?: "sm" | "md" | "lg" }> = ({
+  size = "md",
+}) => {
   const dimensions =
-    size === 'lg'
-      ? 'h-14 w-14 rounded-2xl'
-      : size === 'sm'
-      ? 'h-8 w-8 rounded-lg'
-      : 'h-9 w-9 rounded-xl';
+    size === "lg"
+      ? "h-14 w-14 rounded-2xl"
+      : size === "sm"
+        ? "h-8 w-8 rounded-lg"
+        : "h-9 w-9 rounded-xl";
   const iconSize =
-    size === 'lg' ? 'h-7 w-7' : size === 'sm' ? 'h-4 w-4' : 'h-5 w-5';
+    size === "lg" ? "h-7 w-7" : size === "sm" ? "h-4 w-4" : "h-5 w-5";
 
   return (
     <div
@@ -413,13 +447,17 @@ const BrandBadge: React.FC<{ size?: 'sm' | 'md' | 'lg' }> = ({ size = 'md' }) =>
       <div
         className={`flex h-full w-full items-center justify-center ${dimensions} bg-gradient-to-br from-[#1b1238] via-[#130f2b] to-[#0d1428] text-violet-200`}
       >
-        <ShieldCheck className={`${iconSize} text-cyan-300 drop-shadow-[0_0_8px_rgba(34,211,238,0.5)]`} />
+        <ShieldCheck
+          className={`${iconSize} text-cyan-300 drop-shadow-[0_0_8px_rgba(34,211,238,0.5)]`}
+        />
       </div>
     </div>
   );
 };
 
-const GoogleIcon: React.FC<{ className?: string }> = ({ className = 'h-4 w-4' }) => (
+const GoogleIcon: React.FC<{ className?: string }> = ({
+  className = "h-4 w-4",
+}) => (
   <svg viewBox="0 0 24 24" aria-hidden="true" className={className}>
     <path
       fill="#4285F4"
@@ -455,13 +493,16 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
   onRefreshHealth,
   onLoginSuccess,
 }) => {
-  const [email, setEmail] = useState<string>('');
-  const [password, setPassword] = useState<string>('');
+  const [email, setEmail] = useState<string>("");
+  const [password, setPassword] = useState<string>("");
   const [showPassword, setShowPassword] = useState<boolean>(false);
-  const [formNotice, setFormNotice] = useState<{ type: 'error' | 'info'; text: string } | null>(
-    null
+  const [formNotice, setFormNotice] = useState<{
+    type: "error" | "info";
+    text: string;
+  } | null>(null);
+  const [submittingVia, setSubmittingVia] = useState<"email" | "google" | null>(
+    null,
   );
-  const [submittingVia, setSubmittingVia] = useState<'email' | 'google' | null>(null);
 
   const handleEmailSignIn = (e: React.FormEvent) => {
     e.preventDefault();
@@ -469,53 +510,59 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
 
     const cleanedEmail = email.trim();
     if (!cleanedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanedEmail)) {
-      setFormNotice({ type: 'error', text: 'Please enter a valid email address.' });
+      setFormNotice({
+        type: "error",
+        text: "Please enter a valid email address.",
+      });
       return;
     }
 
     if (password.length < 6) {
       setFormNotice({
-        type: 'error',
-        text: 'Please enter a password with at least 6 characters.',
+        type: "error",
+        text: "Please enter a password with at least 6 characters.",
       });
       return;
     }
 
-    setSubmittingVia('email');
+    setSubmittingVia("email");
     window.setTimeout(() => {
       setSubmittingVia(null);
       onLoginSuccess({
         email: cleanedEmail,
         displayName: deriveDisplayName(cleanedEmail),
-        provider: 'email',
+        provider: "email",
       });
     }, 450);
   };
 
   const handleGoogleSignIn = () => {
     setFormNotice(null);
-    setSubmittingVia('google');
+    setSubmittingVia("google");
     window.setTimeout(() => {
       setSubmittingVia(null);
       onLoginSuccess({
-        email: 'google.account@citeverify.app',
-        displayName: 'Google Researcher',
-        provider: 'google',
+        email: "google.account@citeverify.app",
+        displayName: "Google Researcher",
+        provider: "google",
       });
     }, 450);
   };
 
   const healthLabel =
-    health.status === 'online'
-      ? `API Online${health.latencyMs !== null ? ` · ${health.latencyMs}ms` : ''}`
-      : health.status === 'checking'
-      ? 'Checking API...'
-      : 'API Waking / Offline';
+    health.status === "online"
+      ? `API Online${health.latencyMs !== null ? ` · ${health.latencyMs}ms` : ""}`
+      : health.status === "checking"
+        ? "Checking API..."
+        : "API Waking / Offline";
 
   return (
     <div className="relative flex min-h-screen w-full flex-col justify-between overflow-hidden bg-[#070711] text-slate-100 selection:bg-violet-500/30 selection:text-violet-100">
       {/* Ambient Aurora Violet, Indigo & Cyan Radial Glows */}
-      <div aria-hidden="true" className="pointer-events-none fixed inset-0 overflow-hidden">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-0 overflow-hidden"
+      >
         <div className="absolute -top-48 left-1/2 h-[560px] w-[980px] -translate-x-1/2 rounded-full bg-[radial-gradient(ellipse_at_center,_rgba(139,92,246,0.28)_0%,_rgba(99,102,241,0.16)_38%,_transparent_72%)] blur-3xl" />
         <div className="absolute -right-28 top-12 h-[420px] w-[480px] rounded-full bg-[radial-gradient(circle,_rgba(34,211,238,0.14)_0%,_rgba(168,85,247,0.1)_45%,_transparent_72%)] blur-3xl" />
         <div className="absolute -bottom-36 -left-24 h-[460px] w-[540px] rounded-full bg-[radial-gradient(circle,_rgba(217,70,239,0.14)_0%,_rgba(99,102,241,0.14)_45%,_transparent_72%)] blur-3xl" />
@@ -523,10 +570,12 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
           className="absolute inset-0 opacity-[0.035]"
           style={{
             backgroundImage:
-              'linear-gradient(to right, rgba(255,255,255,0.6) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.6) 1px, transparent 1px)',
-            backgroundSize: '52px 52px',
-            maskImage: 'radial-gradient(ellipse at 50% 35%, black 15%, transparent 72%)',
-            WebkitMaskImage: 'radial-gradient(ellipse at 50% 35%, black 15%, transparent 72%)',
+              "linear-gradient(to right, rgba(255,255,255,0.6) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.6) 1px, transparent 1px)",
+            backgroundSize: "52px 52px",
+            maskImage:
+              "radial-gradient(ellipse at 50% 35%, black 15%, transparent 72%)",
+            WebkitMaskImage:
+              "radial-gradient(ellipse at 50% 35%, black 15%, transparent 72%)",
           }}
         />
       </div>
@@ -552,16 +601,16 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
           className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#0d0c1d]/75 px-3.5 py-1.5 text-xs font-medium text-slate-300 backdrop-blur-xl transition-colors hover:border-violet-400/40 hover:text-white"
         >
           <span className="relative flex h-2 w-2">
-            {health.status === 'online' && (
+            {health.status === "online" && (
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
             )}
             <span
               className={`relative inline-flex h-2 w-2 rounded-full ${
-                health.status === 'online'
-                  ? 'bg-emerald-400'
-                  : health.status === 'checking'
-                  ? 'bg-amber-400'
-                  : 'bg-rose-400'
+                health.status === "online"
+                  ? "bg-emerald-400"
+                  : health.status === "checking"
+                    ? "bg-amber-400"
+                    : "bg-rose-400"
               }`}
             />
           </span>
@@ -588,7 +637,7 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                 Sign in to CiteVerify
               </h1>
               <p className="mt-1.5 text-sm text-slate-400">
-                Access your scientific claim &amp; citation verification workbench
+                Access your scientific claim & citation verification workbench
               </p>
             </div>
 
@@ -597,9 +646,9 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
               <div
                 role="alert"
                 className={`mb-5 flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 text-xs leading-relaxed ${
-                  formNotice.type === 'error'
-                    ? 'border-rose-500/35 bg-rose-500/10 text-rose-200'
-                    : 'border-violet-400/35 bg-violet-500/10 text-violet-200'
+                  formNotice.type === "error"
+                    ? "border-rose-500/35 bg-rose-500/10 text-rose-200"
+                    : "border-violet-400/35 bg-violet-500/10 text-violet-200"
                 }`}
               >
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -645,8 +694,8 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                     type="button"
                     onClick={() =>
                       setFormNotice({
-                        type: 'info',
-                        text: 'Enter any valid email and 6+ character password to enter the workspace.',
+                        type: "info",
+                        text: "Enter any valid email and 6+ character password to enter the workspace.",
                       })
                     }
                     className="text-xs font-medium text-violet-300/90 transition-colors hover:text-violet-200"
@@ -658,7 +707,7 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                   <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500 transition-colors group-focus-within:text-violet-400" />
                   <input
                     id="login-password"
-                    type={showPassword ? 'text' : 'password'}
+                    type={showPassword ? "text" : "password"}
                     autoComplete="current-password"
                     value={password}
                     onChange={(e) => {
@@ -671,10 +720,16 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                   <button
                     type="button"
                     onClick={() => setShowPassword((prev) => !prev)}
-                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    aria-label={
+                      showPassword ? "Hide password" : "Show password"
+                    }
                     className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-1 text-slate-500 transition-colors hover:text-slate-200"
                   >
-                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    {showPassword ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
                   </button>
                 </div>
               </div>
@@ -685,7 +740,7 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                 disabled={submittingVia !== null}
                 className="group relative mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 via-indigo-600 to-fuchsia-600 px-4 py-2.5 text-sm font-medium text-white shadow-[0_12px_32px_-10px_rgba(139,92,246,0.8)] transition-all hover:from-violet-500 hover:via-indigo-500 hover:to-fuchsia-500 hover:shadow-[0_14px_38px_-8px_rgba(168,85,247,0.9)] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-65"
               >
-                {submittingVia === 'email' ? (
+                {submittingVia === "email" ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
                     <span>Signing in...</span>
@@ -715,7 +770,7 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
               disabled={submittingVia !== null}
               className="flex w-full items-center justify-center gap-3 rounded-xl border border-white/12 bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-slate-100 transition-all hover:border-violet-400/45 hover:bg-white/[0.08] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-65"
             >
-              {submittingVia === 'google' ? (
+              {submittingVia === "google" ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin text-violet-300" />
                   <span>Connecting Google...</span>
@@ -732,7 +787,7 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
       </main>
 
       <footer className="relative z-10 pb-6 text-center text-xs text-slate-500">
-        CiteVerify &middot; Scientific Claim &amp; Citation Verification Platform
+        CiteVerify · Scientific Claim & Citation Verification Platform
       </footer>
     </div>
   );
@@ -742,9 +797,12 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
 // 7. Claim Verification Card (Report Viewer)
 // ============================================================================
 
-const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({ item }) => {
+const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({
+  item,
+}) => {
   const statusMeta = STATUS_CONFIG[item.verdict] ?? STATUS_CONFIG.UNSUPPORTED;
-  const confidenceMeta = CONFIDENCE_CONFIG[item.confidence] ?? CONFIDENCE_CONFIG.LOW;
+  const confidenceMeta =
+    CONFIDENCE_CONFIG[item.confidence] ?? CONFIDENCE_CONFIG.LOW;
   const StatusIcon = statusMeta.icon;
 
   return (
@@ -794,20 +852,25 @@ const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({ it
               </span>
               <p className="text-sm leading-relaxed text-slate-300">
                 {item.explanation || (
-                  <span className="italic text-slate-500">No explanation provided.</span>
+                  <span className="italic text-slate-500">
+                    No explanation provided.
+                  </span>
                 )}
               </p>
             </div>
 
-            {item.uncertainty_note && item.uncertainty_note.trim().length > 0 && (
-              <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2.5 text-xs leading-relaxed text-slate-300">
-                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
-                <div>
-                  <span className="font-semibold text-amber-200">Uncertainty Note: </span>
-                  {item.uncertainty_note}
+            {item.uncertainty_note &&
+              item.uncertainty_note.trim().length > 0 && (
+                <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2.5 text-xs leading-relaxed text-slate-300">
+                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+                  <div>
+                    <span className="font-semibold text-amber-200">
+                      Uncertainty Note:{" "}
+                    </span>
+                    {item.uncertainty_note}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
           </div>
 
           {item.mismatch_flags.length > 0 && (
@@ -855,7 +918,7 @@ const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({ it
               </span>
               {item.evidence_passage ? (
                 <blockquote className="rounded-lg border border-white/[0.06] border-l-2 border-l-violet-400/70 bg-white/[0.02] p-3 text-xs italic leading-relaxed text-slate-300 sm:text-sm">
-                  &ldquo;{item.evidence_passage}&rdquo;
+                  “{item.evidence_passage}”
                 </blockquote>
               ) : (
                 <p className="text-xs italic text-slate-500 sm:text-sm">
@@ -893,15 +956,16 @@ export default function App() {
   const [session, setSession] = useState<AuthSession | null>(null);
 
   // Navigation & mobile sidebar drawer
-  const [activeView, setActiveView] = useState<NavView>('verify');
+  const [activeView, setActiveView] = useState<NavView>("verify");
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
 
   // Live API configuration & diagnostics
   const [apiBaseUrl, setApiBaseUrl] = useState<string>(resolveEnvApiUrl);
   const [apiUrlInput, setApiUrlInput] = useState<string>(resolveEnvApiUrl);
-  const [settingsSavedNotice, setSettingsSavedNotice] = useState<boolean>(false);
+  const [settingsSavedNotice, setSettingsSavedNotice] =
+    useState<boolean>(false);
   const [health, setHealth] = useState<HealthCheckDiagnostics>({
-    status: 'checking',
+    status: "checking",
     httpCode: null,
     latencyMs: null,
     checkedAt: null,
@@ -910,41 +974,50 @@ export default function App() {
   });
 
   // View 1: Verify Paper input state
-  const [inputMode, setInputMode] = useState<InputMode>('pdf');
+  const [inputMode, setInputMode] = useState<InputMode>("pdf");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
-  const [documentTitle, setDocumentTitle] = useState<string>('');
-  const [rawText, setRawText] = useState<string>('');
+  const [documentTitle, setDocumentTitle] = useState<string>("");
+  const [rawText, setRawText] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Verification execution state
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [activePipelineStep, setActivePipelineStep] = useState<number>(0);
-  const [showColdStartNotice, setShowColdStartNotice] = useState<boolean>(false);
+  const [showColdStartNotice, setShowColdStartNotice] =
+    useState<boolean>(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
+  const [exportingFormat, setExportingFormat] = useState<
+    "pdf" | "markdown" | null
+  >(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   // View 2: Active report & exploration filters
-  const [activeReport, setActiveReport] = useState<VerificationReport | null>(null);
-  const [verdictFilter, setVerdictFilter] = useState<VerdictFilter>('ALL');
-  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [activeReport, setActiveReport] = useState<VerificationReport | null>(
+    null,
+  );
+  const [verdictFilter, setVerdictFilter] = useState<VerdictFilter>("ALL");
+  const [searchQuery, setSearchQuery] = useState<string>("");
   const [onlyHumanReview, setOnlyHumanReview] = useState<boolean>(false);
 
   // View 3: Session History (starts cleanly empty; only real verified reports stored)
-  const [sessionHistory, setSessionHistory] = useState<SessionHistoryEntry[]>(loadSessionHistory);
-  const [confirmClearHistory, setConfirmClearHistory] = useState<boolean>(false);
+  const [sessionHistory, setSessionHistory] =
+    useState<SessionHistoryEntry[]>(loadSessionHistory);
+  const [confirmClearHistory, setConfirmClearHistory] =
+    useState<boolean>(false);
 
   // --------------------------------------------------------------------------
   // Live GET /health Diagnostics
   // --------------------------------------------------------------------------
   const runHealthCheck = useCallback(async (targetUrl: string) => {
-    setHealth((prev) => ({ ...prev, status: 'checking', errorMessage: null }));
+    setHealth((prev) => ({ ...prev, status: "checking", errorMessage: null }));
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 14000);
     const startTime = performance.now();
 
     try {
       const response = await fetch(`${targetUrl}/health`, {
-        method: 'GET',
+        method: "GET",
         signal: controller.signal,
       });
       const latencyMs = Math.round(performance.now() - startTime);
@@ -952,7 +1025,7 @@ export default function App() {
 
       if (!response.ok) {
         setHealth({
-          status: 'offline',
+          status: "offline",
           httpCode: response.status,
           latencyMs,
           checkedAt: new Date().toISOString(),
@@ -963,7 +1036,7 @@ export default function App() {
       }
 
       setHealth({
-        status: 'online',
+        status: "online",
         httpCode: response.status,
         latencyMs,
         checkedAt: new Date().toISOString(),
@@ -973,15 +1046,15 @@ export default function App() {
     } catch (err) {
       const latencyMs = Math.round(performance.now() - startTime);
       setHealth({
-        status: 'offline',
+        status: "offline",
         httpCode: null,
         latencyMs,
         checkedAt: new Date().toISOString(),
         payload: null,
         errorMessage:
-          err instanceof Error && err.name === 'AbortError'
-            ? 'Health check timed out after 14s (Render free tier may be waking up).'
-            : 'Unable to reach backend /health endpoint. Check the API URL or server status.',
+          err instanceof Error && err.name === "AbortError"
+            ? "Health check timed out after 14s (Render free tier may be waking up)."
+            : "Unable to reach backend /health endpoint. Check the API URL or server status.",
       });
     } finally {
       window.clearTimeout(timeoutId);
@@ -1002,7 +1075,7 @@ export default function App() {
 
     const stepInterval = window.setInterval(() => {
       setActivePipelineStep((prev) =>
-        prev < VERIFICATION_PIPELINE_STEPS.length - 1 ? prev + 1 : prev
+        prev < VERIFICATION_PIPELINE_STEPS.length - 1 ? prev + 1 : prev,
       );
     }, 2400);
 
@@ -1036,19 +1109,20 @@ export default function App() {
     const query = searchQuery.trim().toLowerCase();
 
     return activeReport.results.filter((item) => {
-      if (verdictFilter !== 'ALL' && item.verdict !== verdictFilter) return false;
+      if (verdictFilter !== "ALL" && item.verdict !== verdictFilter)
+        return false;
       if (onlyHumanReview && !item.needs_human_review) return false;
       if (query) {
         const haystack = [
           String(item.claim_id),
           item.claim_text,
-          item.matched_citation ?? '',
-          item.evidence_passage ?? '',
+          item.matched_citation ?? "",
+          item.evidence_passage ?? "",
           item.explanation,
           item.uncertainty_note,
           ...item.mismatch_flags,
         ]
-          .join(' ')
+          .join(" ")
           .toLowerCase();
         return haystack.includes(query);
       }
@@ -1056,8 +1130,6 @@ export default function App() {
     });
   }, [activeReport, verdictFilter, onlyHumanReview, searchQuery]);
 
-  // --------------------------------------------------------------------------
-  // Gate: Render Aurora Violet Login Screen if not signed in
   // --------------------------------------------------------------------------
   // Interaction Handlers (Zero Hardcoded Data, Live Backend Contract)
   // --------------------------------------------------------------------------
@@ -1069,15 +1141,18 @@ export default function App() {
     }
 
     const isPdf =
-      file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+      file.type === "application/pdf" ||
+      file.name.toLowerCase().endsWith(".pdf");
     if (!isPdf) {
-      setVerifyError('Please upload a valid PDF document (.pdf) or switch to Paste Text mode.');
+      setVerifyError(
+        "Please upload a valid PDF document (.pdf) or switch to Paste Text mode.",
+      );
       return;
     }
 
     setSelectedFile(file);
     if (!documentTitle.trim()) {
-      setDocumentTitle(file.name.replace(/\.pdf$/i, ''));
+      setDocumentTitle(file.name.replace(/\.pdf$/i, ""));
     }
   };
 
@@ -1091,15 +1166,16 @@ export default function App() {
   const handleVerifySubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setVerifyError(null);
+    setExportError(null);
 
-    if (inputMode === 'pdf' && !selectedFile) {
-      setVerifyError('Please select a PDF research paper to verify.');
+    if (inputMode === "pdf" && !selectedFile) {
+      setVerifyError("Please select a PDF research paper to verify.");
       return;
     }
 
-    if (inputMode === 'text' && rawText.trim().length < 20) {
+    if (inputMode === "text" && rawText.trim().length < 20) {
       setVerifyError(
-        'Please paste at least 20 characters of scientific text or claims with citations.'
+        "Please paste at least 20 characters of scientific text or claims with citations.",
       );
       return;
     }
@@ -1110,20 +1186,20 @@ export default function App() {
     try {
       let response: Response;
 
-      if (inputMode === 'pdf' && selectedFile) {
+      if (inputMode === "pdf" && selectedFile) {
         const formData = new FormData();
-        formData.append('file', selectedFile);
+        formData.append("file", selectedFile);
         if (documentTitle.trim()) {
-          formData.append('document_title', documentTitle.trim());
+          formData.append("document_title", documentTitle.trim());
         }
         response = await fetch(`${apiBaseUrl}/api/verify`, {
-          method: 'POST',
+          method: "POST",
           body: formData,
         });
       } else {
         response = await fetch(`${apiBaseUrl}/api/verify`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             text: rawText.trim(),
             document_title: documentTitle.trim() || undefined,
@@ -1134,20 +1210,18 @@ export default function App() {
       if (!response.ok) {
         const errBody = await response.json().catch(() => null);
         const detail =
-          errBody && typeof errBody.detail === 'string'
-            ? errBody.detail
-            : null;
+          errBody && typeof errBody.detail === "string" ? errBody.detail : null;
 
         if (response.status === 404) {
           throw new Error(
-            `POST ${apiBaseUrl}/api/verify returned 404 Not Found. Your live backend is healthy, and this UI will work automatically as soon as the /api/verify route is deployed.`
+            `POST ${apiBaseUrl}/api/verify returned 404 Not Found. Your live backend is healthy, and this UI will work automatically as soon as the /api/verify route is deployed.`,
           );
         }
 
         throw new Error(
           detail
             ? `Verification failed (HTTP ${response.status}): ${detail}`
-            : `Backend responded with HTTP ${response.status}. Check /docs on your backend API.`
+            : `Backend responded with HTTP ${response.status}. Check /docs on your backend API.`,
         );
       }
 
@@ -1155,9 +1229,10 @@ export default function App() {
       const normalized = normalizeReport(rawJson);
 
       setActiveReport(normalized);
-      setVerdictFilter('ALL');
-      setSearchQuery('');
+      setVerdictFilter("ALL");
+      setSearchQuery("");
       setOnlyHumanReview(false);
+      setExportError(null);
 
       const newEntry: SessionHistoryEntry = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1172,12 +1247,12 @@ export default function App() {
         return updated;
       });
 
-      setActiveView('report');
+      setActiveView("report");
     } catch (err) {
       setVerifyError(
         err instanceof Error
           ? err.message
-          : 'Unexpected network error while contacting the verification API.'
+          : "Unexpected network error while contacting the verification API.",
       );
     } finally {
       setIsVerifying(false);
@@ -1187,25 +1262,84 @@ export default function App() {
   const handleExportJson = () => {
     if (!activeReport) return;
     const blob = new Blob([JSON.stringify(activeReport, null, 2)], {
-      type: 'application/json',
+      type: "application/json",
     });
     const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
+    const anchor = document.createElement("a");
     const safeTitle = activeReport.document_title
       .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
     anchor.href = url;
-    anchor.download = `${safeTitle || 'citeverify-report'}.json`;
+    anchor.download = `${safeTitle || "citeverify-report"}.json`;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
     URL.revokeObjectURL(url);
   };
 
+  const handleExportReport = async (format: "pdf" | "markdown") => {
+    if (!activeReport || exportingFormat) return;
+    setExportingFormat(format);
+    setExportError(null);
+
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/api/export?format=${format}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(activeReport),
+        },
+      );
+
+      if (!response.ok) {
+        let message = `Export failed with status ${response.status}.`;
+        try {
+          const errBody = await response.json();
+          if (typeof errBody?.detail === "string") {
+            message = errBody.detail;
+          }
+        } catch {
+          // Ignore non-JSON error responses
+        }
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const filenameMatch = disposition.match(/filename="?([^"]+)"?/i);
+      const ext = format === "pdf" ? "pdf" : "md";
+      const safeTitle = activeReport.document_title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_|_$/g, "");
+      const filename =
+        filenameMatch?.[1] ||
+        `citeverify_audit_${safeTitle || "report"}.${ext}`;
+
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(
+        err instanceof Error
+          ? err.message
+          : "Failed to export report. Please try again.",
+      );
+    } finally {
+      setExportingFormat(null);
+    }
+  };
+
   const handleSaveApiUrl = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = apiUrlInput.trim().replace(/\/+$/, '');
+    const cleaned = apiUrlInput.trim().replace(/\/+$/, "");
     if (!cleaned || !/^https?:\/\//i.test(cleaned)) {
       return;
     }
@@ -1225,10 +1359,11 @@ export default function App() {
 
   const handleOpenHistoryEntry = (entry: SessionHistoryEntry) => {
     setActiveReport(entry.report);
-    setVerdictFilter('ALL');
-    setSearchQuery('');
+    setVerdictFilter("ALL");
+    setSearchQuery("");
     setOnlyHumanReview(false);
-    setActiveView('report');
+    setExportError(null);
+    setActiveView("report");
   };
 
   const handleDeleteHistoryEntry = (id: string) => {
@@ -1260,7 +1395,7 @@ export default function App() {
         onRefreshHealth={() => runHealthCheck(apiBaseUrl)}
         onLoginSuccess={(nextSession) => {
           setSession(nextSession);
-          setActiveView('verify');
+          setActiveView("verify");
         }}
       />
     );
@@ -1275,42 +1410,47 @@ export default function App() {
     icon: React.ComponentType<{ className?: string }>;
     badge?: string | number;
   }> = [
-    { id: 'verify', label: 'Verify Paper', icon: FileSearch },
+    { id: "verify", label: "Verify Paper", icon: FileSearch },
     {
-      id: 'report',
-      label: 'Active Report',
+      id: "report",
+      label: "Active Report",
       icon: ClipboardList,
       badge: activeReport ? activeReport.total_claims : undefined,
     },
     {
-      id: 'history',
-      label: 'Session History',
+      id: "history",
+      label: "Session History",
       icon: History,
       badge: sessionHistory.length > 0 ? sessionHistory.length : undefined,
     },
-    { id: 'settings', label: 'API & Settings', icon: Settings },
+    { id: "settings", label: "API & Settings", icon: Settings },
   ];
 
   const viewHeaderMeta: Record<NavView, { title: string; subtitle: string }> = {
     verify: {
-      title: 'Verify Scientific Paper',
-      subtitle: 'Upload a PDF manuscript or paste claim passages to cross-check citations',
+      title: "Verify Scientific Paper",
+      subtitle:
+        "Upload a PDF manuscript or paste claim passages to cross-check citations",
     },
     report: {
-      title: 'Verification Report',
-      subtitle: 'Claim-by-claim verdict inspection, source passages, and human-review flags',
+      title: "Verification Report",
+      subtitle:
+        "Claim-by-claim verdict inspection, source passages, and human-review flags",
     },
     history: {
-      title: 'Session History',
-      subtitle: 'Reports verified during this browser session (stored locally)',
+      title: "Session History",
+      subtitle: "Reports verified during this browser session (stored locally)",
     },
     settings: {
-      title: 'API & Settings',
-      subtitle: 'Live backend diagnostics, endpoint configuration, and schema contract',
+      title: "API & Settings",
+      subtitle:
+        "Live backend diagnostics, endpoint configuration, and schema contract",
     },
   };
 
-  const userInitial = (session.displayName || session.email || 'R').charAt(0).toUpperCase();
+  const userInitial = (session.displayName || session.email || "R")
+    .charAt(0)
+    .toUpperCase();
 
   // Reusable Sidebar Content (Desktop & Mobile Drawer)
   const renderSidebarContent = () => (
@@ -1324,7 +1464,9 @@ export default function App() {
               <span className="block text-sm font-semibold tracking-tight text-white">
                 CiteVerify
               </span>
-              <span className="block text-[11px] text-slate-400">Research Workbench</span>
+              <span className="block text-[11px] text-slate-400">
+                Research Workbench
+              </span>
             </div>
           </div>
           <button
@@ -1342,7 +1484,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
-              setActiveView('verify');
+              setActiveView("verify");
               setVerifyError(null);
               setMobileMenuOpen(false);
             }}
@@ -1368,14 +1510,16 @@ export default function App() {
                 }}
                 className={`group flex w-full items-center justify-between rounded-xl px-3.5 py-2.5 text-sm font-medium transition-all ${
                   isActive
-                    ? 'border border-violet-400/30 bg-violet-500/15 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]'
-                    : 'border border-transparent text-slate-400 hover:bg-white/[0.04] hover:text-slate-100'
+                    ? "border border-violet-400/30 bg-violet-500/15 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+                    : "border border-transparent text-slate-400 hover:bg-white/[0.04] hover:text-slate-100"
                 }`}
               >
                 <span className="flex items-center gap-3">
                   <Icon
                     className={`h-4 w-4 transition-colors ${
-                      isActive ? 'text-violet-300' : 'text-slate-500 group-hover:text-slate-300'
+                      isActive
+                        ? "text-violet-300"
+                        : "text-slate-500 group-hover:text-slate-300"
                     }`}
                   />
                   {item.label}
@@ -1385,20 +1529,20 @@ export default function App() {
                   <span
                     className={`rounded-full px-2 py-0.5 font-mono text-[11px] ${
                       isActive
-                        ? 'bg-violet-400/25 text-violet-100'
-                        : 'bg-white/[0.06] text-slate-400'
+                        ? "bg-violet-400/25 text-violet-100"
+                        : "bg-white/[0.06] text-slate-400"
                     }`}
                   >
                     {item.badge}
                   </span>
-                ) : item.id === 'settings' ? (
+                ) : item.id === "settings" ? (
                   <span
                     className={`h-2 w-2 rounded-full ${
-                      health.status === 'online'
-                        ? 'bg-emerald-400'
-                        : health.status === 'checking'
-                        ? 'bg-amber-400'
-                        : 'bg-rose-400'
+                      health.status === "online"
+                        ? "bg-emerald-400"
+                        : health.status === "checking"
+                          ? "bg-amber-400"
+                          : "bg-rose-400"
                     }`}
                   />
                 ) : null}
@@ -1416,8 +1560,12 @@ export default function App() {
               {userInitial}
             </div>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-xs font-semibold text-white">{session.displayName}</p>
-              <p className="truncate text-[11px] text-slate-400">{session.email}</p>
+              <p className="truncate text-xs font-semibold text-white">
+                {session.displayName}
+              </p>
+              <p className="truncate text-[11px] text-slate-400">
+                {session.email}
+              </p>
             </div>
           </div>
           <button
@@ -1439,7 +1587,10 @@ export default function App() {
   return (
     <div className="relative flex min-h-screen w-full bg-[#070711] text-slate-100 selection:bg-violet-500/30 selection:text-violet-100">
       {/* Subtle Ambient Aurora Backdrop */}
-      <div aria-hidden="true" className="pointer-events-none fixed inset-0 overflow-hidden">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-0 overflow-hidden"
+      >
         <div className="absolute -top-40 left-1/3 h-[420px] w-[720px] rounded-full bg-[radial-gradient(ellipse_at_center,_rgba(139,92,246,0.16)_0%,_rgba(99,102,241,0.08)_45%,_transparent_72%)] blur-3xl" />
         <div className="absolute bottom-0 right-0 h-[380px] w-[480px] rounded-full bg-[radial-gradient(circle,_rgba(34,211,238,0.09)_0%,_rgba(168,85,247,0.06)_45%,_transparent_72%)] blur-3xl" />
       </div>
@@ -1494,29 +1645,29 @@ export default function App() {
               className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#0d0c1d]/90 px-3 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:border-violet-400/40 hover:text-white"
             >
               <span className="relative flex h-2 w-2">
-                {health.status === 'online' && (
+                {health.status === "online" && (
                   <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
                 )}
                 <span
                   className={`relative inline-flex h-2 w-2 rounded-full ${
-                    health.status === 'online'
-                      ? 'bg-emerald-400'
-                      : health.status === 'checking'
-                      ? 'bg-amber-400'
-                      : 'bg-rose-400'
+                    health.status === "online"
+                      ? "bg-emerald-400"
+                      : health.status === "checking"
+                        ? "bg-amber-400"
+                        : "bg-rose-400"
                   }`}
                 />
               </span>
               <span className="hidden sm:inline">
-                {health.status === 'online'
-                  ? `API Healthy${health.latencyMs !== null ? ` · ${health.latencyMs}ms` : ''}`
-                  : health.status === 'checking'
-                  ? 'Pinging API...'
-                  : 'API Offline'}
+                {health.status === "online"
+                  ? `API Healthy${health.latencyMs !== null ? ` · ${health.latencyMs}ms` : ""}`
+                  : health.status === "checking"
+                    ? "Pinging API..."
+                    : "API Offline"}
               </span>
               <RefreshCw
                 className={`h-3 w-3 text-slate-400 ${
-                  health.status === 'checking' ? 'animate-spin' : ''
+                  health.status === "checking" ? "animate-spin" : ""
                 }`}
               />
             </button>
@@ -1538,7 +1689,7 @@ export default function App() {
           {/* ================================================================ */}
           {/* VIEW 1: VERIFY PAPER WORKBENCH                                   */}
           {/* ================================================================ */}
-          {activeView === 'verify' && (
+          {activeView === "verify" && (
             <div className="space-y-6">
               {/* Primary Verification Card */}
               <section className="relative overflow-hidden rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-5 sm:p-8 shadow-[0_24px_80px_-24px_rgba(0,0,0,0.85)] backdrop-blur-2xl">
@@ -1564,13 +1715,13 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        setInputMode('pdf');
+                        setInputMode("pdf");
                         setVerifyError(null);
                       }}
                       className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-medium transition-all ${
-                        inputMode === 'pdf'
-                          ? 'bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-slate-200'
+                        inputMode === "pdf"
+                          ? "bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm"
+                          : "text-slate-400 hover:text-slate-200"
                       }`}
                     >
                       <Upload className="h-3.5 w-3.5" />
@@ -1579,13 +1730,13 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        setInputMode('text');
+                        setInputMode("text");
                         setVerifyError(null);
                       }}
                       className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-medium transition-all ${
-                        inputMode === 'text'
-                          ? 'bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-slate-200'
+                        inputMode === "text"
+                          ? "bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm"
+                          : "text-slate-400 hover:text-slate-200"
                       }`}
                     >
                       <FileText className="h-3.5 w-3.5" />
@@ -1601,7 +1752,8 @@ export default function App() {
                       htmlFor="doc-title"
                       className="mb-1.5 block text-xs font-medium text-slate-300"
                     >
-                      Document Title <span className="text-slate-500">(optional)</span>
+                      Document Title{" "}
+                      <span className="text-slate-500">(optional)</span>
                     </label>
                     <input
                       id="doc-title"
@@ -1615,13 +1767,15 @@ export default function App() {
                   </div>
 
                   {/* PDF Upload Mode */}
-                  {inputMode === 'pdf' ? (
+                  {inputMode === "pdf" ? (
                     <div>
                       <input
                         ref={fileInputRef}
                         type="file"
                         accept=".pdf,application/pdf"
-                        onChange={(e) => handleFilePicked(e.target.files?.[0] ?? null)}
+                        onChange={(e) =>
+                          handleFilePicked(e.target.files?.[0] ?? null)
+                        }
                         className="hidden"
                       />
 
@@ -1629,9 +1783,14 @@ export default function App() {
                         <div
                           role="button"
                           tabIndex={0}
-                          onClick={() => !isVerifying && fileInputRef.current?.click()}
+                          onClick={() =>
+                            !isVerifying && fileInputRef.current?.click()
+                          }
                           onKeyDown={(e) => {
-                            if ((e.key === 'Enter' || e.key === ' ') && !isVerifying) {
+                            if (
+                              (e.key === "Enter" || e.key === " ") &&
+                              !isVerifying
+                            ) {
                               e.preventDefault();
                               fileInputRef.current?.click();
                             }
@@ -1644,21 +1803,22 @@ export default function App() {
                           onDrop={handleDrop}
                           className={`group flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-12 text-center transition-all ${
                             isDragging
-                              ? 'border-violet-400 bg-violet-500/15'
-                              : 'border-white/15 bg-white/[0.02] hover:border-violet-400/50 hover:bg-violet-500/[0.05]'
+                              ? "border-violet-400 bg-violet-500/15"
+                              : "border-white/15 bg-white/[0.02] hover:border-violet-400/50 hover:bg-violet-500/[0.05]"
                           }`}
                         >
                           <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-violet-400/30 bg-violet-500/15 text-violet-300 transition-transform group-hover:scale-105">
                             <FileUp className="h-6 w-6" />
                           </div>
                           <p className="text-sm font-medium text-white">
-                            Drag and drop your PDF paper here, or{' '}
+                            Drag and drop your PDF paper here, or{" "}
                             <span className="text-violet-300 underline decoration-violet-400/50 underline-offset-4">
                               browse files
                             </span>
                           </p>
                           <p className="mt-1.5 text-xs text-slate-400">
-                            Supports standard academic PDFs with inline citations and reference lists
+                            Supports standard academic PDFs with inline
+                            citations and reference lists
                           </p>
                         </div>
                       ) : (
@@ -1672,7 +1832,8 @@ export default function App() {
                                 {selectedFile.name}
                               </p>
                               <p className="text-xs text-slate-400">
-                                PDF Document &middot; {formatFileSize(selectedFile.size)}
+                                PDF Document ·{" "}
+                                {formatFileSize(selectedFile.size)}
                               </p>
                             </div>
                           </div>
@@ -1707,7 +1868,7 @@ export default function App() {
                           htmlFor="raw-paper-text"
                           className="text-xs font-medium text-slate-300"
                         >
-                          Scientific Claims &amp; Reference List
+                          Scientific Claims & Reference List
                         </label>
                         <div className="flex items-center gap-3 text-[11px] text-slate-400">
                           <span>{textMetrics.words} words</span>
@@ -1715,7 +1876,7 @@ export default function App() {
                           {rawText.length > 0 && !isVerifying && (
                             <button
                               type="button"
-                              onClick={() => setRawText('')}
+                              onClick={() => setRawText("")}
                               className="text-violet-300 hover:text-violet-200"
                             >
                               Clear
@@ -1746,7 +1907,9 @@ export default function App() {
                     >
                       <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
                       <div className="flex-1">
-                        <p className="font-medium text-rose-100">Verification Request Notice</p>
+                        <p className="font-medium text-rose-100">
+                          Verification Request Notice
+                        </p>
                         <p className="mt-0.5 text-rose-200/90">{verifyError}</p>
                       </div>
                       <button
@@ -1770,7 +1933,8 @@ export default function App() {
                           </span>
                         </div>
                         <span className="font-mono text-xs text-violet-300">
-                          Step {activePipelineStep + 1} / {VERIFICATION_PIPELINE_STEPS.length}
+                          Step {activePipelineStep + 1} /{" "}
+                          {VERIFICATION_PIPELINE_STEPS.length}
                         </span>
                       </div>
 
@@ -1783,10 +1947,10 @@ export default function App() {
                               key={step.id}
                               className={`rounded-xl border p-3 transition-all ${
                                 isCurrent
-                                  ? 'border-violet-400/50 bg-violet-500/15'
+                                  ? "border-violet-400/50 bg-violet-500/15"
                                   : isDone
-                                  ? 'border-emerald-500/30 bg-emerald-500/10'
-                                  : 'border-white/[0.06] bg-black/20 opacity-55'
+                                    ? "border-emerald-500/30 bg-emerald-500/10"
+                                    : "border-white/[0.06] bg-black/20 opacity-55"
                               }`}
                             >
                               <div className="flex items-center gap-2">
@@ -1812,8 +1976,9 @@ export default function App() {
                       {showColdStartNotice && (
                         <p className="mt-3.5 flex items-center gap-2 text-xs text-amber-200/90">
                           <Clock className="h-3.5 w-3.5 shrink-0 text-amber-400" />
-                          Render free-tier servers can take 15–40 seconds to wake up on the first
-                          request. Waiting for live response...
+                          Render free-tier servers can take 15–40 seconds to
+                          wake up on the first request. Waiting for live
+                          response...
                         </p>
                       )}
                     </div>
@@ -1823,7 +1988,9 @@ export default function App() {
                   <div className="flex flex-col-reverse items-stretch justify-between gap-3 border-t border-white/[0.08] pt-5 sm:flex-row sm:items-center">
                     <div className="flex items-center gap-2 text-xs text-slate-400">
                       <Server className="h-3.5 w-3.5 text-violet-400" />
-                      <span className="truncate font-mono">{apiBaseUrl}/api/verify</span>
+                      <span className="truncate font-mono">
+                        {apiBaseUrl}/api/verify
+                      </span>
                     </div>
 
                     <button
@@ -1853,10 +2020,13 @@ export default function App() {
                   <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-violet-400/25 bg-violet-500/12 text-violet-300">
                     <Layers className="h-4 w-4" />
                   </div>
-                  <h3 className="text-sm font-semibold text-white">1. Claim &amp; Marker Parsing</h3>
+                  <h3 className="text-sm font-semibold text-white">
+                    1. Claim & Marker Parsing
+                  </h3>
                   <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                    Extracts individual scientific claims, inline markers, and bibliography strings
-                    from uploaded PDFs or pasted manuscript text.
+                    Extracts individual scientific claims, inline markers, and
+                    bibliography strings from uploaded PDFs or pasted manuscript
+                    text.
                   </p>
                 </div>
 
@@ -1864,10 +2034,13 @@ export default function App() {
                   <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-400/25 bg-cyan-500/12 text-cyan-300">
                     <BookOpen className="h-4 w-4" />
                   </div>
-                  <h3 className="text-sm font-semibold text-white">2. Source Evidence Retrieval</h3>
+                  <h3 className="text-sm font-semibold text-white">
+                    2. Source Evidence Retrieval
+                  </h3>
                   <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                    Resolves cited papers, extracts matching evidence passages, and detects
-                    retractions or metadata mismatches automatically.
+                    Resolves cited papers, extracts matching evidence passages,
+                    and detects retractions or metadata mismatches
+                    automatically.
                   </p>
                 </div>
 
@@ -1875,10 +2048,13 @@ export default function App() {
                   <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-400/25 bg-emerald-500/12 text-emerald-300">
                     <ShieldCheck className="h-4 w-4" />
                   </div>
-                  <h3 className="text-sm font-semibold text-white">3. 5-Tier Verdict &amp; Review</h3>
+                  <h3 className="text-sm font-semibold text-white">
+                    3. 5-Tier Verdict & Review
+                  </h3>
                   <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                    Scores every claim across Supported, Partially Supported, Unsupported,
-                    Contradictory, or Potentially Outdated with confidence &amp; human-review flags.
+                    Scores every claim across Supported, Partially Supported,
+                    Unsupported, Contradictory, or Potentially Outdated with
+                    confidence & human-review flags.
                   </p>
                 </div>
               </section>
@@ -1888,21 +2064,24 @@ export default function App() {
           {/* ================================================================ */}
           {/* VIEW 2: ACTIVE VERIFICATION REPORT VIEWER                        */}
           {/* ================================================================ */}
-          {activeView === 'report' && (
+          {activeView === "report" && (
             <div className="space-y-6">
               {!activeReport ? (
                 <div className="flex flex-col items-center justify-center rounded-3xl border border-white/10 bg-[#0d0c1d]/75 px-6 py-16 text-center backdrop-blur-xl">
                   <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-violet-400/25 bg-violet-500/12 text-violet-300">
                     <ClipboardList className="h-6 w-6" />
                   </div>
-                  <h2 className="text-lg font-semibold text-white">No Active Verification Report</h2>
+                  <h2 className="text-lg font-semibold text-white">
+                    No Active Verification Report
+                  </h2>
                   <p className="mt-1.5 max-w-md text-sm text-slate-400">
-                    Submit a PDF manuscript or paste scientific text from the Verify Paper workspace
-                    to inspect claim-by-claim verdicts here.
+                    Submit a PDF manuscript or paste scientific text from the
+                    Verify Paper workspace to inspect claim-by-claim verdicts
+                    here.
                   </p>
                   <button
                     type="button"
-                    onClick={() => setActiveView('verify')}
+                    onClick={() => setActiveView("verify")}
                     className="mt-6 inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 via-indigo-600 to-fuchsia-600 px-5 py-2.5 text-sm font-medium text-white shadow-[0_10px_28px_-10px_rgba(139,92,246,0.8)] transition-all hover:from-violet-500 hover:via-indigo-500 hover:to-fuchsia-500"
                   >
                     Go to Verify Paper
@@ -1922,28 +2101,64 @@ export default function App() {
                           {activeReport.document_title}
                         </h2>
                         <p className="mt-1 text-xs text-slate-400">
-                          {activeReport.total_claims} total claims evaluated &middot; Showing{' '}
-                          {filteredClaims.length} matching current filters
+                          {activeReport.total_claims} total claims evaluated ·
+                          Showing {filteredClaims.length} matching current
+                          filters
                         </p>
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-2.5">
-                        <button
-                          type="button"
-                          onClick={handleExportJson}
-                          className="inline-flex items-center gap-2 rounded-xl border border-white/12 bg-white/[0.04] px-3.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-violet-400/45 hover:bg-white/[0.08]"
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                          Export JSON
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setActiveView('verify')}
-                          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-3.5 py-2 text-xs font-medium text-white transition-all hover:from-violet-500 hover:to-indigo-500"
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          Verify Another
-                        </button>
+                      <div className="flex flex-col items-end gap-2">
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <button
+                            type="button"
+                            onClick={() => handleExportReport("pdf")}
+                            disabled={exportingFormat !== null}
+                            className="inline-flex items-center gap-2 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-3.5 py-2 text-xs font-medium text-cyan-200 transition-colors hover:border-cyan-300/60 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {exportingFormat === "pdf" ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <FileText className="h-3.5 w-3.5" />
+                            )}
+                            {exportingFormat === "pdf"
+                              ? "Exporting PDF..."
+                              : "Export PDF"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleExportReport("markdown")}
+                            disabled={exportingFormat !== null}
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/12 bg-white/[0.04] px-3.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-violet-400/45 hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {exportingFormat === "markdown" ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Download className="h-3.5 w-3.5" />
+                            )}
+                            {exportingFormat === "markdown"
+                              ? "Exporting MD..."
+                              : "Export MD"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleExportJson}
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/12 bg-white/[0.04] px-3.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-violet-400/45 hover:bg-white/[0.08]"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            Export JSON
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setActiveView("verify")}
+                            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-3.5 py-2 text-xs font-medium text-white transition-all hover:from-violet-500 hover:to-indigo-500"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            Verify Another
+                          </button>
+                        </div>
+                        {exportError && (
+                          <p className="text-xs text-rose-400">{exportError}</p>
+                        )}
                       </div>
                     </div>
 
@@ -1962,16 +2177,20 @@ export default function App() {
                                 key={status}
                                 type="button"
                                 onClick={() =>
-                                  setVerdictFilter((prev) => (prev === status ? 'ALL' : status))
+                                  setVerdictFilter((prev) =>
+                                    prev === status ? "ALL" : status,
+                                  )
                                 }
                                 className={`flex flex-col items-start rounded-2xl border p-3.5 text-left transition-all ${
                                   isSelected
-                                    ? 'border-violet-400/60 bg-violet-500/15 ring-2 ring-violet-500/20'
-                                    : 'border-white/[0.08] bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
+                                    ? "border-violet-400/60 bg-violet-500/15 ring-2 ring-violet-500/20"
+                                    : "border-white/[0.08] bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]"
                                 }`}
                               >
                                 <div className="flex w-full items-center justify-between">
-                                  <span className={`h-2 w-2 rounded-full ${meta.dotClass}`} />
+                                  <span
+                                    className={`h-2 w-2 rounded-full ${meta.dotClass}`}
+                                  />
                                   <Icon className="h-4 w-4 text-slate-400" />
                                 </div>
                                 <span className="mt-2.5 text-2xl font-bold tracking-tight text-white">
@@ -1992,7 +2211,8 @@ export default function App() {
                               {ALL_STATUSES.map((status) => {
                                 const count = reportCounts[status];
                                 if (count <= 0) return null;
-                                const pct = (count / activeReport.total_claims) * 100;
+                                const pct =
+                                  (count / activeReport.total_claims) * 100;
                                 return (
                                   <div
                                     key={`bar-${status}`}
@@ -2047,20 +2267,22 @@ export default function App() {
                         onClick={() => setOnlyHumanReview((prev) => !prev)}
                         className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-all ${
                           onlyHumanReview
-                            ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
-                            : 'border-white/10 bg-white/[0.03] text-slate-300 hover:border-white/20'
+                            ? "border-amber-400/50 bg-amber-500/15 text-amber-200"
+                            : "border-white/10 bg-white/[0.03] text-slate-300 hover:border-white/20"
                         }`}
                       >
                         <Filter className="h-3.5 w-3.5" />
                         Needs Human Review
                       </button>
 
-                      {(verdictFilter !== 'ALL' || searchQuery.trim() || onlyHumanReview) && (
+                      {(verdictFilter !== "ALL" ||
+                        searchQuery.trim() ||
+                        onlyHumanReview) && (
                         <button
                           type="button"
                           onClick={() => {
-                            setVerdictFilter('ALL');
-                            setSearchQuery('');
+                            setVerdictFilter("ALL");
+                            setSearchQuery("");
                             setOnlyHumanReview(false);
                           }}
                           className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:border-violet-400/40 hover:text-white"
@@ -2081,8 +2303,8 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => {
-                          setVerdictFilter('ALL');
-                          setSearchQuery('');
+                          setVerdictFilter("ALL");
+                          setSearchQuery("");
                           setOnlyHumanReview(false);
                         }}
                         className="mt-3 text-xs font-medium text-violet-300 hover:text-violet-200"
@@ -2093,7 +2315,10 @@ export default function App() {
                   ) : (
                     <div className="space-y-4">
                       {filteredClaims.map((claim) => (
-                        <ClaimVerificationCard key={claim.claim_id} item={claim} />
+                        <ClaimVerificationCard
+                          key={claim.claim_id}
+                          item={claim}
+                        />
                       ))}
                     </div>
                   )}
@@ -2105,12 +2330,13 @@ export default function App() {
           {/* ================================================================ */}
           {/* VIEW 3: SESSION HISTORY                                          */}
           {/* ================================================================ */}
-          {activeView === 'history' && (
+          {activeView === "history" && (
             <div className="space-y-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-xs text-slate-400">
-                  {sessionHistory.length} verified{' '}
-                  {sessionHistory.length === 1 ? 'report' : 'reports'} saved in this browser
+                  {sessionHistory.length} verified{" "}
+                  {sessionHistory.length === 1 ? "report" : "reports"} saved in
+                  this browser
                 </p>
 
                 {sessionHistory.length > 0 && (
@@ -2152,14 +2378,17 @@ export default function App() {
                   <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-violet-400/25 bg-violet-500/12 text-violet-300">
                     <History className="h-6 w-6" />
                   </div>
-                  <h2 className="text-lg font-semibold text-white">No Verification History Yet</h2>
+                  <h2 className="text-lg font-semibold text-white">
+                    No Verification History Yet
+                  </h2>
                   <p className="mt-1.5 max-w-md text-sm text-slate-400">
-                    Every real verification report returned by your backend will automatically be
-                    archived here so you can re-open or export it anytime.
+                    Every real verification report returned by your backend will
+                    automatically be archived here so you can re-open or export
+                    it anytime.
                   </p>
                   <button
                     type="button"
-                    onClick={() => setActiveView('verify')}
+                    onClick={() => setActiveView("verify")}
                     className="mt-6 inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 via-indigo-600 to-fuchsia-600 px-5 py-2.5 text-sm font-medium text-white shadow-[0_10px_28px_-10px_rgba(139,92,246,0.8)]"
                   >
                     Start First Verification
@@ -2183,7 +2412,7 @@ export default function App() {
                             <span className="text-xs text-slate-400">
                               {formatTimestamp(entry.verifiedAt)}
                             </span>
-                            <span className="text-xs text-slate-500">&middot;</span>
+                            <span className="text-xs text-slate-500">·</span>
                             <span className="text-xs font-medium text-slate-300">
                               {entry.report.total_claims} claims
                             </span>
@@ -2200,7 +2429,7 @@ export default function App() {
                                 >
                                   {STATUS_CONFIG[st].shortLabel}: {counts[st]}
                                 </span>
-                              ) : null
+                              ) : null,
                             )}
                           </div>
                         </div>
@@ -2234,7 +2463,7 @@ export default function App() {
           {/* ================================================================ */}
           {/* VIEW 4: API & SETTINGS                                           */}
           {/* ================================================================ */}
-          {activeView === 'settings' && (
+          {activeView === "settings" && (
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               {/* Endpoint Configuration Card */}
               <section className="rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-6 backdrop-blur-2xl">
@@ -2243,9 +2472,12 @@ export default function App() {
                     <Link2 className="h-5 w-5" />
                   </div>
                   <div>
-                    <h2 className="text-base font-semibold text-white">Backend API Endpoint</h2>
+                    <h2 className="text-base font-semibold text-white">
+                      Backend API Endpoint
+                    </h2>
                     <p className="text-xs text-slate-400">
-                      Defaults automatically to <code className="text-violet-300">VITE_API_URL</code>
+                      Defaults automatically to{" "}
+                      <code className="text-violet-300">VITE_API_URL</code>
                     </p>
                   </div>
                 </div>
@@ -2312,8 +2544,12 @@ export default function App() {
                       <Activity className="h-5 w-5" />
                     </div>
                     <div>
-                      <h2 className="text-base font-semibold text-white">Live /health Diagnostics</h2>
-                      <p className="text-xs text-slate-400">Real-time ping against FastAPI backend</p>
+                      <h2 className="text-base font-semibold text-white">
+                        Live /health Diagnostics
+                      </h2>
+                      <p className="text-xs text-slate-400">
+                        Real-time ping against FastAPI backend
+                      </p>
                     </div>
                   </div>
                   <button
@@ -2322,7 +2558,7 @@ export default function App() {
                     className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-violet-400/40"
                   >
                     <RefreshCw
-                      className={`h-3.5 w-3.5 ${health.status === 'checking' ? 'animate-spin' : ''}`}
+                      className={`h-3.5 w-3.5 ${health.status === "checking" ? "animate-spin" : ""}`}
                     />
                     Re-test
                   </button>
@@ -2331,18 +2567,22 @@ export default function App() {
                 <dl className="grid grid-cols-3 gap-3 text-xs">
                   <div className="rounded-xl border border-white/[0.07] bg-black/25 p-3">
                     <dt className="text-slate-400">Status</dt>
-                    <dd className="mt-1 font-semibold capitalize text-white">{health.status}</dd>
+                    <dd className="mt-1 font-semibold capitalize text-white">
+                      {health.status}
+                    </dd>
                   </div>
                   <div className="rounded-xl border border-white/[0.07] bg-black/25 p-3">
                     <dt className="text-slate-400">HTTP Code</dt>
                     <dd className="mt-1 font-mono font-semibold text-white">
-                      {health.httpCode ?? '—'}
+                      {health.httpCode ?? "—"}
                     </dd>
                   </div>
                   <div className="rounded-xl border border-white/[0.07] bg-black/25 p-3">
                     <dt className="text-slate-400">Latency</dt>
                     <dd className="mt-1 font-mono font-semibold text-white">
-                      {health.latencyMs !== null ? `${health.latencyMs} ms` : '—'}
+                      {health.latencyMs !== null
+                        ? `${health.latencyMs} ms`
+                        : "—"}
                     </dd>
                   </div>
                 </dl>
@@ -2360,7 +2600,7 @@ export default function App() {
                   <pre className="max-h-36 overflow-auto rounded-xl border border-white/[0.07] bg-black/40 p-3 font-mono text-xs text-cyan-200/90">
                     {health.payload
                       ? JSON.stringify(health.payload, null, 2)
-                      : '// No JSON payload received yet'}
+                      : "// No JSON payload received yet"}
                   </pre>
                 </div>
               </section>
@@ -2376,13 +2616,14 @@ export default function App() {
                       Expected Response Contract (backend/schemas.py)
                     </h2>
                     <p className="text-xs text-slate-400">
-                      Frontend types mirror VerificationReport and ClaimVerificationResult strictly
+                      Frontend types mirror VerificationReport and
+                      ClaimVerificationResult strictly
                     </p>
                   </div>
                 </div>
 
                 <pre className="overflow-x-auto rounded-2xl border border-white/[0.07] bg-black/40 p-4 font-mono text-xs leading-relaxed text-slate-300">
-{`POST ${apiBaseUrl}/api/verify  ->  VerificationReport
+                  {`POST ${apiBaseUrl}/api/verify  ->  VerificationReport
 {
   "document_title": string,
   "total_claims": number,
