@@ -5,6 +5,7 @@ import React, {
   useRef,
   useCallback,
 } from "react";
+import type { User as SupabaseUser } from "@supabase/supabase-js";
 import {
   ShieldCheck,
   FileText,
@@ -46,7 +47,11 @@ import {
   Plus,
   Server,
   Filter,
+  Cloud,
+  Database,
+  User as UserIcon,
 } from "lucide-react";
+import { supabase, isSupabaseConfigured } from "./lib/supabase";
 
 // ============================================================================
 // 1. Strict Backend Contract Types (Mirrors backend/schemas.py Exactly)
@@ -91,11 +96,14 @@ type HealthState = "checking" | "online" | "offline";
 type InputMode = "pdf" | "text";
 type VerdictFilter = "ALL" | ClaimStatus;
 type NavView = "verify" | "report" | "history" | "settings";
+type AuthMode = "signin" | "signup";
 
 interface AuthSession {
+  userId: string | null;
   email: string;
   displayName: string;
   provider: "email" | "google";
+  isCloudAuth: boolean;
 }
 
 interface SessionHistoryEntry {
@@ -103,6 +111,7 @@ interface SessionHistoryEntry {
   verifiedAt: string;
   inputMethod: InputMode;
   report: VerificationReport;
+  syncedToCloud: boolean;
 }
 
 interface HealthCheckDiagnostics {
@@ -112,6 +121,15 @@ interface HealthCheckDiagnostics {
   checkedAt: string | null;
   payload: unknown;
   errorMessage: string | null;
+}
+
+interface SupabaseReportRow {
+  id: string;
+  document_title: string;
+  input_method: string;
+  total_claims: number;
+  report_json: unknown;
+  created_at: string;
 }
 
 // ============================================================================
@@ -235,7 +253,7 @@ const CONFIDENCE_CONFIG: Record<
 };
 
 // ============================================================================
-// 4. Environment, Normalization & Storage Helpers
+// 4. Environment, Normalization, Auth & Storage Helpers
 // ============================================================================
 
 /**
@@ -368,28 +386,60 @@ function computeStatusCounts(
 }
 
 /**
- * Safely reads persisted session history from localStorage (starts empty).
+ * Maps an authenticated Supabase User into the UI AuthSession shape.
  */
-function loadSessionHistory(): SessionHistoryEntry[] {
+function mapSupabaseUser(user: SupabaseUser): AuthSession {
+  const email = user.email || "researcher@citeverify.app";
+  const metadata = (user.user_metadata || {}) as Record<string, unknown>;
+  const fullName =
+    typeof metadata.full_name === "string" &&
+    metadata.full_name.trim().length > 0
+      ? metadata.full_name.trim()
+      : typeof metadata.name === "string" && metadata.name.trim().length > 0
+        ? metadata.name.trim()
+        : deriveDisplayName(email);
+
+  const rawProvider = String(
+    user.app_metadata?.provider || "email",
+  ).toLowerCase();
+
+  return {
+    userId: user.id,
+    email,
+    displayName: fullName,
+    provider: rawProvider === "google" ? "google" : "email",
+    isCloudAuth: true,
+  };
+}
+
+/**
+ * Safely reads persisted local session history (fallback when Supabase is unconfigured).
+ */
+function loadLocalSessionHistory(): SessionHistoryEntry[] {
   try {
     const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is SessionHistoryEntry =>
-      Boolean(
-        item &&
-        typeof item.id === "string" &&
-        item.report &&
-        Array.isArray(item.report.results),
-      ),
-    );
+    return parsed
+      .filter((item): item is SessionHistoryEntry =>
+        Boolean(
+          item &&
+          typeof item.id === "string" &&
+          item.report &&
+          Array.isArray(item.report.results),
+        ),
+      )
+      .map((item) => ({
+        ...item,
+        syncedToCloud: Boolean(item.syncedToCloud),
+      }));
   } catch {
     return [];
   }
 }
 
-function saveSessionHistory(entries: SessionHistoryEntry[]): void {
+function saveLocalSessionHistory(entries: SessionHistoryEntry[]): void {
   try {
     window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(entries));
   } catch {
@@ -479,7 +529,7 @@ const GoogleIcon: React.FC<{ className?: string }> = ({
 );
 
 // ============================================================================
-// 6. Aurora Violet Login Screen (Entry Gate)
+// 6. Aurora Violet Login & Sign-Up Screen (Supabase Auth + Fallback)
 // ============================================================================
 
 interface AuroraLoginScreenProps {
@@ -493,18 +543,20 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
   onRefreshHealth,
   onLoginSuccess,
 }) => {
+  const [authMode, setAuthMode] = useState<AuthMode>("signin");
+  const [fullName, setFullName] = useState<string>("");
   const [email, setEmail] = useState<string>("");
   const [password, setPassword] = useState<string>("");
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [formNotice, setFormNotice] = useState<{
-    type: "error" | "info";
+    type: "error" | "info" | "success";
     text: string;
   } | null>(null);
   const [submittingVia, setSubmittingVia] = useState<"email" | "google" | null>(
     null,
   );
 
-  const handleEmailSignIn = (e: React.FormEvent) => {
+  const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormNotice(null);
 
@@ -526,27 +578,111 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
     }
 
     setSubmittingVia("email");
-    window.setTimeout(() => {
+
+    // Local fallback when Supabase env vars are not configured
+    if (!supabase || !isSupabaseConfigured) {
+      window.setTimeout(() => {
+        setSubmittingVia(null);
+        onLoginSuccess({
+          userId: null,
+          email: cleanedEmail,
+          displayName: fullName.trim() || deriveDisplayName(cleanedEmail),
+          provider: "email",
+          isCloudAuth: false,
+        });
+      }, 350);
+      return;
+    }
+
+    try {
+      if (authMode === "signup") {
+        const displayName = fullName.trim() || deriveDisplayName(cleanedEmail);
+        const { data, error } = await supabase.auth.signUp({
+          email: cleanedEmail,
+          password,
+          options: {
+            data: { full_name: displayName },
+            emailRedirectTo: window.location.origin,
+          },
+        });
+
+        if (error) {
+          throw error;
+        }
+
+        if (data.session?.user) {
+          onLoginSuccess(mapSupabaseUser(data.session.user));
+          return;
+        }
+
+        setFormNotice({
+          type: "success",
+          text: "Account created! Check your email inbox to confirm your address, then sign in.",
+        });
+        setAuthMode("signin");
+      } else {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: cleanedEmail,
+          password,
+        });
+
+        if (error) {
+          throw error;
+        }
+
+        if (data.user) {
+          onLoginSuccess(mapSupabaseUser(data.user));
+        }
+      }
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Authentication failed. Please check your credentials and try again.";
+      setFormNotice({ type: "error", text: message });
+    } finally {
       setSubmittingVia(null);
-      onLoginSuccess({
-        email: cleanedEmail,
-        displayName: deriveDisplayName(cleanedEmail),
-        provider: "email",
-      });
-    }, 450);
+    }
   };
 
-  const handleGoogleSignIn = () => {
+  const handleGoogleSignIn = async () => {
     setFormNotice(null);
     setSubmittingVia("google");
-    window.setTimeout(() => {
-      setSubmittingVia(null);
-      onLoginSuccess({
-        email: "google.account@citeverify.app",
-        displayName: "Google Researcher",
+
+    if (!supabase || !isSupabaseConfigured) {
+      window.setTimeout(() => {
+        setSubmittingVia(null);
+        onLoginSuccess({
+          userId: null,
+          email: "google.account@citeverify.app",
+          displayName: "Google Researcher",
+          provider: "google",
+          isCloudAuth: false,
+        });
+      }, 350);
+      return;
+    }
+
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
+        options: {
+          redirectTo: window.location.origin,
+        },
       });
-    }, 450);
+      if (error) {
+        throw error;
+      }
+    } catch (err) {
+      const rawMsg = err instanceof Error ? err.message : "";
+      const friendlyMsg = rawMsg
+        .toLowerCase()
+        .includes("provider is not enabled")
+        ? "Google OAuth is not enabled in Supabase yet. Sign in or create an account with Email & Password above, or enable Google under Supabase Authentication -> Providers."
+        : rawMsg || "Unable to start Google sign-in right now.";
+      setFormNotice({ type: "error", text: friendlyMsg });
+      setSubmittingVia(null);
+    }
   };
 
   const healthLabel =
@@ -594,31 +730,39 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={onRefreshHealth}
-          title="Ping live backend /health endpoint"
-          className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#0d0c1d]/75 px-3.5 py-1.5 text-xs font-medium text-slate-300 backdrop-blur-xl transition-colors hover:border-violet-400/40 hover:text-white"
-        >
-          <span className="relative flex h-2 w-2">
-            {health.status === "online" && (
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-            )}
-            <span
-              className={`relative inline-flex h-2 w-2 rounded-full ${
-                health.status === "online"
-                  ? "bg-emerald-400"
-                  : health.status === "checking"
-                    ? "bg-amber-400"
-                    : "bg-rose-400"
-              }`}
-            />
-          </span>
-          <span>{healthLabel}</span>
-        </button>
+        <div className="flex items-center gap-2">
+          {isSupabaseConfigured && (
+            <span className="hidden items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300 sm:inline-flex">
+              <Cloud className="h-3.5 w-3.5" />
+              Cloud Auth Ready
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onRefreshHealth}
+            title="Ping live backend /health endpoint"
+            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#0d0c1d]/75 px-3.5 py-1.5 text-xs font-medium text-slate-300 backdrop-blur-xl transition-colors hover:border-violet-400/40 hover:text-white"
+          >
+            <span className="relative flex h-2 w-2">
+              {health.status === "online" && (
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+              )}
+              <span
+                className={`relative inline-flex h-2 w-2 rounded-full ${
+                  health.status === "online"
+                    ? "bg-emerald-400"
+                    : health.status === "checking"
+                      ? "bg-amber-400"
+                      : "bg-rose-400"
+                }`}
+              />
+            </span>
+            <span>{healthLabel}</span>
+          </button>
+        </div>
       </header>
 
-      {/* Centered Frosted-Glass Login Card */}
+      {/* Centered Frosted-Glass Login / Sign-Up Card */}
       <main className="relative z-10 flex flex-1 items-center justify-center px-4 py-10">
         <div className="w-full max-w-md">
           <div className="relative rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-7 sm:p-9 shadow-[0_28px_90px_-18px_rgba(0,0,0,0.9),0_0_65px_-22px_rgba(139,92,246,0.35)] ring-1 ring-violet-400/15 backdrop-blur-2xl">
@@ -629,16 +773,52 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
             />
 
             {/* Header */}
-            <div className="mb-7 text-center">
+            <div className="mb-6 text-center">
               <div className="mb-4 flex justify-center">
                 <BrandBadge size="lg" />
               </div>
               <h1 className="text-2xl font-semibold tracking-tight text-white">
-                Sign in to CiteVerify
+                {authMode === "signin"
+                  ? "Sign in to CiteVerify"
+                  : "Create your account"}
               </h1>
               <p className="mt-1.5 text-sm text-slate-400">
-                Access your scientific claim & citation verification workbench
+                {authMode === "signin"
+                  ? "Access your scientific claim & citation verification workbench"
+                  : "Sync verified manuscripts and audit reports in the cloud"}
               </p>
+            </div>
+
+            {/* Sign In / Create Account Mode Toggle */}
+            <div className="mb-5 grid grid-cols-2 rounded-xl border border-white/10 bg-black/35 p-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode("signin");
+                  setFormNotice(null);
+                }}
+                className={`rounded-lg py-2 text-xs font-medium transition-all ${
+                  authMode === "signin"
+                    ? "bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                Sign In
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode("signup");
+                  setFormNotice(null);
+                }}
+                className={`rounded-lg py-2 text-xs font-medium transition-all ${
+                  authMode === "signup"
+                    ? "bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                Create Account
+              </button>
             </div>
 
             {/* Inline Validation / Notice */}
@@ -648,16 +828,45 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                 className={`mb-5 flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 text-xs leading-relaxed ${
                   formNotice.type === "error"
                     ? "border-rose-500/35 bg-rose-500/10 text-rose-200"
-                    : "border-violet-400/35 bg-violet-500/10 text-violet-200"
+                    : formNotice.type === "success"
+                      ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-200"
+                      : "border-violet-400/35 bg-violet-500/10 text-violet-200"
                 }`}
               >
-                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                {formNotice.type === "success" ? (
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+                ) : (
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                )}
                 <span>{formNotice.text}</span>
               </div>
             )}
 
             {/* Email & Password Form */}
-            <form onSubmit={handleEmailSignIn} className="space-y-4" noValidate>
+            <form onSubmit={handleEmailAuth} className="space-y-4" noValidate>
+              {authMode === "signup" && (
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="signup-name"
+                    className="block text-xs font-medium tracking-wide text-slate-300"
+                  >
+                    Full name <span className="text-slate-500">(optional)</span>
+                  </label>
+                  <div className="group relative">
+                    <UserIcon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500 transition-colors group-focus-within:text-violet-400" />
+                    <input
+                      id="signup-name"
+                      type="text"
+                      autoComplete="name"
+                      value={fullName}
+                      onChange={(e) => setFullName(e.target.value)}
+                      placeholder="Dr. Ada Lovelace"
+                      className="w-full rounded-xl border border-white/10 bg-white/[0.04] py-2.5 pl-10 pr-4 text-sm text-white placeholder:text-slate-500 transition-all focus:border-violet-400/75 focus:bg-white/[0.06] focus:outline-none focus:ring-4 focus:ring-violet-500/15"
+                    />
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-1.5">
                 <label
                   htmlFor="login-email"
@@ -690,25 +899,33 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                   >
                     Password
                   </label>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setFormNotice({
-                        type: "info",
-                        text: "Enter any valid email and 6+ character password to enter the workspace.",
-                      })
-                    }
-                    className="text-xs font-medium text-violet-300/90 transition-colors hover:text-violet-200"
-                  >
-                    Forgot password?
-                  </button>
+                  {authMode === "signin" && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setFormNotice({
+                          type: "info",
+                          text: isSupabaseConfigured
+                            ? 'New here? Switch to "Create Account" above to register with email and a 6+ character password.'
+                            : "Enter any valid email and 6+ character password to enter the workspace.",
+                        })
+                      }
+                      className="text-xs font-medium text-violet-300/90 transition-colors hover:text-violet-200"
+                    >
+                      Need an account?
+                    </button>
+                  )}
                 </div>
                 <div className="group relative">
                   <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500 transition-colors group-focus-within:text-violet-400" />
                   <input
                     id="login-password"
                     type={showPassword ? "text" : "password"}
-                    autoComplete="current-password"
+                    autoComplete={
+                      authMode === "signin"
+                        ? "current-password"
+                        : "new-password"
+                    }
                     value={password}
                     onChange={(e) => {
                       setPassword(e.target.value);
@@ -734,7 +951,7 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                 </div>
               </div>
 
-              {/* Primary Aurora Violet Sign In CTA */}
+              {/* Primary Aurora Violet CTA */}
               <button
                 type="submit"
                 disabled={submittingVia !== null}
@@ -743,11 +960,17 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                 {submittingVia === "email" ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Signing in...</span>
+                    <span>
+                      {authMode === "signin"
+                        ? "Signing in..."
+                        : "Creating account..."}
+                    </span>
                   </>
                 ) : (
                   <>
-                    <span>Sign In</span>
+                    <span>
+                      {authMode === "signin" ? "Sign In" : "Create Account"}
+                    </span>
                     <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
                   </>
                 )}
@@ -948,12 +1171,13 @@ const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({
 };
 
 // ============================================================================
-// 8. Main Application Component (Login Gate + Complete Post-Login SaaS App)
+// 8. Main Application Component (Supabase Auth + Cloud History + Workbench)
 // ============================================================================
 
 export default function App() {
-  // Authentication session state (starts on Aurora Violet login gate)
+  // Authentication session state
   const [session, setSession] = useState<AuthSession | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(isSupabaseConfigured);
 
   // Navigation & mobile sidebar drawer
   const [activeView, setActiveView] = useState<NavView>("verify");
@@ -981,7 +1205,7 @@ export default function App() {
   const [rawText, setRawText] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Verification execution state
+  // Verification & Export execution state
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [activePipelineStep, setActivePipelineStep] = useState<number>(0);
   const [showColdStartNotice, setShowColdStartNotice] =
@@ -1000,11 +1224,111 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [onlyHumanReview, setOnlyHumanReview] = useState<boolean>(false);
 
-  // View 3: Session History (starts cleanly empty; only real verified reports stored)
-  const [sessionHistory, setSessionHistory] =
-    useState<SessionHistoryEntry[]>(loadSessionHistory);
+  // View 3: Cloud & Local Session History
+  const [sessionHistory, setSessionHistory] = useState<SessionHistoryEntry[]>(
+    () => (isSupabaseConfigured ? [] : loadLocalSessionHistory()),
+  );
+  const [historyLoading, setHistoryLoading] = useState<boolean>(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [confirmClearHistory, setConfirmClearHistory] =
     useState<boolean>(false);
+
+  // --------------------------------------------------------------------------
+  // Supabase Auth Session Bootstrap & Listener
+  // --------------------------------------------------------------------------
+  useEffect(() => {
+    if (!supabase || !isSupabaseConfigured) {
+      setAuthLoading(false);
+      return;
+    }
+
+    let isMounted = true;
+
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!isMounted) return;
+        if (data.session?.user) {
+          setSession(mapSupabaseUser(data.session.user));
+        } else {
+          setSession(null);
+        }
+      })
+      .catch(() => {
+        if (isMounted) setSession(null);
+      })
+      .finally(() => {
+        if (isMounted) setAuthLoading(false);
+      });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!isMounted) return;
+      if (nextSession?.user) {
+        setSession(mapSupabaseUser(nextSession.user));
+      } else {
+        setSession(null);
+        setActiveReport(null);
+        setSessionHistory([]);
+      }
+      setAuthLoading(false);
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  // --------------------------------------------------------------------------
+  // Load Cloud Report History from Supabase Postgres
+  // --------------------------------------------------------------------------
+  const fetchCloudHistory = useCallback(async (userId: string) => {
+    if (!supabase || !isSupabaseConfigured) return;
+    setHistoryLoading(true);
+    setHistoryError(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("verification_reports")
+        .select(
+          "id, document_title, input_method, total_claims, report_json, created_at",
+        )
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (error) {
+        throw error;
+      }
+
+      const rows = (data || []) as SupabaseReportRow[];
+      const mapped: SessionHistoryEntry[] = rows.map((row) => ({
+        id: row.id,
+        verifiedAt: row.created_at,
+        inputMethod: row.input_method === "text" ? "text" : "pdf",
+        report: normalizeReport(row.report_json),
+        syncedToCloud: true,
+      }));
+
+      setSessionHistory(mapped);
+    } catch (err) {
+      setHistoryError(
+        err instanceof Error
+          ? `Could not load cloud history: ${err.message}`
+          : "Could not load cloud history from Supabase.",
+      );
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (session?.userId && session.isCloudAuth && isSupabaseConfigured) {
+      fetchCloudHistory(session.userId);
+    }
+  }, [session?.userId, session?.isCloudAuth, fetchCloudHistory]);
 
   // --------------------------------------------------------------------------
   // Live GET /health Diagnostics
@@ -1131,7 +1455,7 @@ export default function App() {
   }, [activeReport, verdictFilter, onlyHumanReview, searchQuery]);
 
   // --------------------------------------------------------------------------
-  // Interaction Handlers (Zero Hardcoded Data, Live Backend Contract)
+  // Interaction Handlers (Live FastAPI + Supabase Cloud Persistence)
   // --------------------------------------------------------------------------
   const handleFilePicked = (file: File | null) => {
     setVerifyError(null);
@@ -1234,18 +1558,60 @@ export default function App() {
       setOnlyHumanReview(false);
       setExportError(null);
 
-      const newEntry: SessionHistoryEntry = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        verifiedAt: new Date().toISOString(),
-        inputMethod: inputMode,
-        report: normalized,
-      };
+      const tempId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const nowIso = new Date().toISOString();
 
-      setSessionHistory((prev) => {
-        const updated = [newEntry, ...prev].slice(0, 25);
-        saveSessionHistory(updated);
-        return updated;
-      });
+      // Persist directly to Supabase Cloud History if authenticated
+      if (supabase && isSupabaseConfigured && session?.userId) {
+        const { data: inserted, error: insertError } = await supabase
+          .from("verification_reports")
+          .insert({
+            user_id: session.userId,
+            document_title: normalized.document_title,
+            input_method: inputMode,
+            total_claims: normalized.total_claims,
+            report_json: normalized,
+          })
+          .select("id, created_at")
+          .single();
+
+        if (insertError) {
+          setHistoryError(
+            `Report verified, but cloud save failed: ${insertError.message}`,
+          );
+          const fallbackEntry: SessionHistoryEntry = {
+            id: tempId,
+            verifiedAt: nowIso,
+            inputMethod: inputMode,
+            report: normalized,
+            syncedToCloud: false,
+          };
+          setSessionHistory((prev) => [fallbackEntry, ...prev].slice(0, 50));
+        } else {
+          setHistoryError(null);
+          const cloudEntry: SessionHistoryEntry = {
+            id: inserted?.id || tempId,
+            verifiedAt: inserted?.created_at || nowIso,
+            inputMethod: inputMode,
+            report: normalized,
+            syncedToCloud: true,
+          };
+          setSessionHistory((prev) => [cloudEntry, ...prev].slice(0, 50));
+        }
+      } else {
+        const localEntry: SessionHistoryEntry = {
+          id: tempId,
+          verifiedAt: nowIso,
+          inputMethod: inputMode,
+          report: normalized,
+          syncedToCloud: false,
+        };
+        setSessionHistory((prev) => {
+          const updated = [localEntry, ...prev].slice(0, 25);
+          saveLocalSessionHistory(updated);
+          return updated;
+        });
+      }
 
       setActiveView("report");
     } catch (err) {
@@ -1366,27 +1732,82 @@ export default function App() {
     setActiveView("report");
   };
 
-  const handleDeleteHistoryEntry = (id: string) => {
+  const handleDeleteHistoryEntry = async (entry: SessionHistoryEntry) => {
+    setHistoryError(null);
     setSessionHistory((prev) => {
-      const updated = prev.filter((item) => item.id !== id);
-      saveSessionHistory(updated);
+      const updated = prev.filter((item) => item.id !== entry.id);
+      if (!session?.isCloudAuth) {
+        saveLocalSessionHistory(updated);
+      }
       return updated;
     });
+
+    if (
+      supabase &&
+      isSupabaseConfigured &&
+      session?.userId &&
+      entry.syncedToCloud
+    ) {
+      const { error } = await supabase
+        .from("verification_reports")
+        .delete()
+        .eq("id", entry.id)
+        .eq("user_id", session.userId);
+
+      if (error) {
+        setHistoryError(`Failed to delete cloud report: ${error.message}`);
+        fetchCloudHistory(session.userId);
+      }
+    }
   };
 
-  const handleClearAllHistory = () => {
-    setSessionHistory([]);
-    saveSessionHistory([]);
+  const handleClearAllHistory = async () => {
+    setHistoryError(null);
     setConfirmClearHistory(false);
+    setSessionHistory([]);
+
+    if (supabase && isSupabaseConfigured && session?.userId) {
+      const { error } = await supabase
+        .from("verification_reports")
+        .delete()
+        .eq("user_id", session.userId);
+
+      if (error) {
+        setHistoryError(`Failed to clear cloud history: ${error.message}`);
+        fetchCloudHistory(session.userId);
+      }
+    } else {
+      saveLocalSessionHistory([]);
+    }
   };
 
-  const handleSignOut = () => {
-    setSession(null);
+  const handleSignOut = async () => {
     setMobileMenuOpen(false);
+    if (supabase && isSupabaseConfigured && session?.isCloudAuth) {
+      await supabase.auth.signOut().catch(() => null);
+    }
+    setSession(null);
+    setActiveReport(null);
+    setSessionHistory(isSupabaseConfigured ? [] : loadLocalSessionHistory());
   };
 
   // --------------------------------------------------------------------------
-  // Gate: Render Aurora Violet Login Screen if not signed in
+  // Gate 1: Brief Session Bootstrap Screen While Checking Supabase Auth
+  // --------------------------------------------------------------------------
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen w-full flex-col items-center justify-center bg-[#070711] px-4 text-slate-100">
+        <BrandBadge size="lg" />
+        <div className="mt-5 flex items-center gap-2.5 text-sm text-slate-300">
+          <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
+          <span>Restoring your CiteVerify workspace...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Gate 2: Render Aurora Violet Login Screen if not signed in
   // --------------------------------------------------------------------------
   if (!session) {
     return (
@@ -1404,6 +1825,10 @@ export default function App() {
   // --------------------------------------------------------------------------
   // Post-Login Navigation Config
   // --------------------------------------------------------------------------
+  const isCloudMode = Boolean(
+    session.isCloudAuth && session.userId && isSupabaseConfigured,
+  );
+
   const navItems: Array<{
     id: NavView;
     label: string;
@@ -1419,7 +1844,7 @@ export default function App() {
     },
     {
       id: "history",
-      label: "Session History",
+      label: "Cloud History",
       icon: History,
       badge: sessionHistory.length > 0 ? sessionHistory.length : undefined,
     },
@@ -1438,13 +1863,15 @@ export default function App() {
         "Claim-by-claim verdict inspection, source passages, and human-review flags",
     },
     history: {
-      title: "Session History",
-      subtitle: "Reports verified during this browser session (stored locally)",
+      title: isCloudMode ? "Cloud Verification History" : "Session History",
+      subtitle: isCloudMode
+        ? "Your verified audit reports synced securely in Supabase Postgres"
+        : "Reports verified during this browser session (stored locally)",
     },
     settings: {
       title: "API & Settings",
       subtitle:
-        "Live backend diagnostics, endpoint configuration, and schema contract",
+        "Live backend diagnostics, Supabase cloud status, and schema contract",
     },
   };
 
@@ -1556,7 +1983,7 @@ export default function App() {
       <div className="border-t border-white/[0.08] p-4">
         <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500/30 to-cyan-500/30 border border-violet-400/30 text-sm font-semibold text-violet-100">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-violet-400/30 bg-gradient-to-br from-violet-500/30 to-cyan-500/30 text-sm font-semibold text-violet-100">
               {userInitial}
             </div>
             <div className="min-w-0 flex-1">
@@ -1568,6 +1995,12 @@ export default function App() {
               </p>
             </div>
           </div>
+          {isCloudMode && (
+            <div className="mt-2.5 flex items-center gap-1.5 text-[11px] text-emerald-300/90">
+              <Cloud className="h-3 w-3 shrink-0" />
+              <span>Supabase Cloud Sync Active</span>
+            </div>
+          )}
           <button
             type="button"
             onClick={handleSignOut}
@@ -2328,52 +2761,97 @@ export default function App() {
           )}
 
           {/* ================================================================ */}
-          {/* VIEW 3: SESSION HISTORY                                          */}
+          {/* VIEW 3: CLOUD & SESSION HISTORY                                  */}
           {/* ================================================================ */}
           {activeView === "history" && (
             <div className="space-y-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-xs text-slate-400">
-                  {sessionHistory.length} verified{" "}
-                  {sessionHistory.length === 1 ? "report" : "reports"} saved in
-                  this browser
-                </p>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <p className="text-xs text-slate-400">
+                    {sessionHistory.length} verified{" "}
+                    {sessionHistory.length === 1 ? "report" : "reports"}{" "}
+                    {isCloudMode
+                      ? "saved in Supabase Cloud"
+                      : "saved in this browser"}
+                  </p>
+                  {isCloudMode && (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-300">
+                      <Cloud className="h-3 w-3" />
+                      Synced
+                    </span>
+                  )}
+                </div>
 
-                {sessionHistory.length > 0 && (
-                  <div className="flex items-center gap-2">
-                    {!confirmClearHistory ? (
-                      <button
-                        type="button"
-                        onClick={() => setConfirmClearHistory(true)}
-                        className="inline-flex items-center gap-1.5 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-200 transition-colors hover:bg-rose-500/20"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        Clear History
-                      </button>
-                    ) : (
-                      <div className="inline-flex items-center gap-2 rounded-xl border border-rose-500/40 bg-rose-500/15 px-3 py-1.5 text-xs">
-                        <span className="text-rose-100">Clear all?</span>
+                <div className="flex items-center gap-2">
+                  {isCloudMode && session.userId && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        fetchCloudHistory(session.userId as string)
+                      }
+                      disabled={historyLoading}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-violet-400/40 disabled:opacity-50"
+                    >
+                      <RefreshCw
+                        className={`h-3.5 w-3.5 ${historyLoading ? "animate-spin" : ""}`}
+                      />
+                      Refresh
+                    </button>
+                  )}
+
+                  {sessionHistory.length > 0 && (
+                    <>
+                      {!confirmClearHistory ? (
                         <button
                           type="button"
-                          onClick={handleClearAllHistory}
-                          className="font-semibold text-rose-200 underline underline-offset-2 hover:text-white"
+                          onClick={() => setConfirmClearHistory(true)}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-200 transition-colors hover:bg-rose-500/20"
                         >
-                          Confirm
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Clear History
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmClearHistory(false)}
-                          className="text-slate-300 hover:text-white"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
+                      ) : (
+                        <div className="inline-flex items-center gap-2 rounded-xl border border-rose-500/40 bg-rose-500/15 px-3 py-1.5 text-xs">
+                          <span className="text-rose-100">Clear all?</span>
+                          <button
+                            type="button"
+                            onClick={handleClearAllHistory}
+                            className="font-semibold text-rose-200 underline underline-offset-2 hover:text-white"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmClearHistory(false)}
+                            className="text-slate-300 hover:text-white"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
 
-              {sessionHistory.length === 0 ? (
+              {historyError && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2.5 rounded-xl border border-rose-500/35 bg-rose-500/10 px-4 py-3 text-xs text-rose-200"
+                >
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+                  <span>{historyError}</span>
+                </div>
+              )}
+
+              {historyLoading && sessionHistory.length === 0 ? (
+                <div className="flex flex-col items-center justify-center rounded-3xl border border-white/10 bg-[#0d0c1d]/75 px-6 py-16 text-center backdrop-blur-xl">
+                  <Loader2 className="h-6 w-6 animate-spin text-violet-400" />
+                  <p className="mt-3 text-sm text-slate-300">
+                    Loading your verified reports from Supabase...
+                  </p>
+                </div>
+              ) : sessionHistory.length === 0 ? (
                 <div className="flex flex-col items-center justify-center rounded-3xl border border-white/10 bg-[#0d0c1d]/75 px-6 py-16 text-center backdrop-blur-xl">
                   <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-violet-400/25 bg-violet-500/12 text-violet-300">
                     <History className="h-6 w-6" />
@@ -2382,9 +2860,9 @@ export default function App() {
                     No Verification History Yet
                   </h2>
                   <p className="mt-1.5 max-w-md text-sm text-slate-400">
-                    Every real verification report returned by your backend will
-                    automatically be archived here so you can re-open or export
-                    it anytime.
+                    {isCloudMode
+                      ? "Every manuscript you verify is automatically saved to your Supabase account so you can re-open or export it from any device."
+                      : "Every real verification report returned by your backend will automatically be archived here so you can re-open or export it anytime."}
                   </p>
                   <button
                     type="button"
@@ -2409,6 +2887,12 @@ export default function App() {
                             <span className="rounded-md border border-violet-400/25 bg-violet-500/12 px-2 py-0.5 text-[11px] font-medium uppercase text-violet-200">
                               {entry.inputMethod}
                             </span>
+                            {entry.syncedToCloud && (
+                              <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
+                                <Cloud className="h-3 w-3" />
+                                Cloud
+                              </span>
+                            )}
                             <span className="text-xs text-slate-400">
                               {formatTimestamp(entry.verifiedAt)}
                             </span>
@@ -2445,7 +2929,7 @@ export default function App() {
                           </button>
                           <button
                             type="button"
-                            onClick={() => handleDeleteHistoryEntry(entry.id)}
+                            onClick={() => handleDeleteHistoryEntry(entry)}
                             aria-label="Delete history entry"
                             className="rounded-xl border border-white/10 bg-white/[0.03] p-2 text-slate-400 transition-colors hover:border-rose-500/35 hover:bg-rose-500/10 hover:text-rose-300"
                           >
@@ -2603,6 +3087,63 @@ export default function App() {
                       : "// No JSON payload received yet"}
                   </pre>
                 </div>
+              </section>
+
+              {/* Supabase Auth & Cloud Database Status Card */}
+              <section className="rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-6 backdrop-blur-2xl lg:col-span-2">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-400/25 bg-emerald-500/12 text-emerald-300">
+                      <Database className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-base font-semibold text-white">
+                        Supabase Auth & Cloud History
+                      </h2>
+                      <p className="text-xs text-slate-400">
+                        Row-Level-Security isolated Postgres table{" "}
+                        <code className="text-emerald-300">
+                          public.verification_reports
+                        </code>
+                      </p>
+                    </div>
+                  </div>
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium ${
+                      isCloudMode
+                        ? "border-emerald-500/30 bg-emerald-500/12 text-emerald-300"
+                        : "border-amber-500/30 bg-amber-500/12 text-amber-300"
+                    }`}
+                  >
+                    <Cloud className="h-3.5 w-3.5" />
+                    {isCloudMode
+                      ? "Connected & Syncing"
+                      : "Local Fallback Mode"}
+                  </span>
+                </div>
+
+                <dl className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-3">
+                  <div className="rounded-xl border border-white/[0.07] bg-black/25 p-3">
+                    <dt className="text-slate-400">Signed-In Account</dt>
+                    <dd className="mt-1 truncate font-medium text-white">
+                      {session.email}
+                    </dd>
+                  </div>
+                  <div className="rounded-xl border border-white/[0.07] bg-black/25 p-3">
+                    <dt className="text-slate-400">Auth Provider</dt>
+                    <dd className="mt-1 font-medium capitalize text-white">
+                      {isCloudMode
+                        ? `Supabase (${session.provider})`
+                        : "Local Session"}
+                    </dd>
+                  </div>
+                  <div className="rounded-xl border border-white/[0.07] bg-black/25 p-3">
+                    <dt className="text-slate-400">Stored Cloud Reports</dt>
+                    <dd className="mt-1 font-mono font-semibold text-white">
+                      {sessionHistory.length}
+                    </dd>
+                  </div>
+                </dl>
               </section>
 
               {/* Backend Schema Contract Card */}
