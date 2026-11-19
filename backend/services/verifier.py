@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from pathlib import Path
 from collections import Counter
@@ -11,21 +12,71 @@ from pydantic import BaseModel, Field
 
 try:
     from backend.schemas import (
+        AtomicPropositionResult,
+        ClaimDecompositionData,
         ClaimStatus,
         ClaimVerificationResult,
         ConfidenceLevel,
+        EvidenceRankingData,
         ExtractedClaim,
+        RankedEvidenceItem,
         RetrievedSource,
+        TemporalAssessmentData,
+        UncertaintyCalibrationData,
         VerificationReport,
+    )
+    from backend.services.claim_decomposer import (
+        PropositionVerdict,
+        combine_proposition_verdicts,
+        decompose_claim,
+    )
+    from backend.services.evidence_ranker import (
+        EvidenceCandidate,
+        RankedEvidence,
+        rank_and_verify_evidence,
+    )
+    from backend.services.temporal_tracker import (
+        PublicationStage,
+        TemporalCitationProfile,
+        assess_temporal_validity,
+        fetch_temporal_profile_live,
+    )
+    from backend.services.uncertainty_calibrator import (
+        calibrate_verification_result,
     )
 except ImportError:
     from schemas import (
+        AtomicPropositionResult,
+        ClaimDecompositionData,
         ClaimStatus,
         ClaimVerificationResult,
         ConfidenceLevel,
+        EvidenceRankingData,
         ExtractedClaim,
+        RankedEvidenceItem,
         RetrievedSource,
+        TemporalAssessmentData,
+        UncertaintyCalibrationData,
         VerificationReport,
+    )
+    from services.claim_decomposer import (
+        PropositionVerdict,
+        combine_proposition_verdicts,
+        decompose_claim,
+    )
+    from services.evidence_ranker import (
+        EvidenceCandidate,
+        RankedEvidence,
+        rank_and_verify_evidence,
+    )
+    from services.temporal_tracker import (
+        PublicationStage,
+        TemporalCitationProfile,
+        assess_temporal_validity,
+        fetch_temporal_profile_live,
+    )
+    from services.uncertainty_calibrator import (
+        calibrate_verification_result,
     )
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -41,6 +92,8 @@ RETRY_SCHEDULE = [
     (FALLBACK_GEMINI_MODEL, 1.5),
     (SECONDARY_FALLBACK_MODEL, 0.0),
 ]
+
+_INLINE_DOI_RE = re.compile(r"(10\.\d{4,9}/[^\s\"'<>]+)", re.IGNORECASE)
 
 
 class _LLMVerdictOutput(BaseModel):
@@ -68,13 +121,340 @@ def _format_citation(claim: ExtractedClaim, source: RetrievedSource) -> str:
     return claim.raw_reference or claim.inline_marker or "Unmatched Citation"
 
 
-def verify_single_claim(
+def _extract_clean_doi(claim: ExtractedClaim, source: RetrievedSource) -> Optional[str]:
+    """Extracts a bare DOI from either source.doi_url or claim.raw_reference."""
+    for candidate in (source.doi_url, claim.raw_reference):
+        if not candidate:
+            continue
+        match = _INLINE_DOI_RE.search(candidate)
+        if match:
+            return match.group(1).rstrip(".,;)]}")
+    return None
+
+
+def _split_passage_into_candidates(source: RetrievedSource) -> List[EvidenceCandidate]:
+    """Splits a retrieved abstract/passage into sentence-level candidates for Gap 1 ranking."""
+    raw_text = (source.source_passage or "").strip()
+    if not raw_text:
+        return []
+
+    raw_sentences = [
+        s.strip() for s in re.split(r"(?<=[.!?])\s+", raw_text) if s.strip()
+    ]
+
+    merged: List[str] = []
+    buffer = ""
+    for sent in raw_sentences:
+        if buffer:
+            sent = f"{buffer} {sent}"
+            buffer = ""
+        if len(sent) < 35:
+            buffer = sent
+        else:
+            merged.append(sent)
+    if buffer:
+        if merged:
+            merged[-1] = f"{merged[-1]} {buffer}"
+        else:
+            merged.append(buffer)
+
+    if not merged:
+        merged = [raw_text]
+
+    return [
+        EvidenceCandidate(
+            passage_id=f"p_{idx}",
+            text=sentence,
+            source_title=source.title,
+            source_url=source.doi_url,
+        )
+        for idx, sentence in enumerate(merged[:12], start=1)
+    ]
+
+
+def _run_gap1_evidence_ranking(
     claim: ExtractedClaim,
     source: RetrievedSource,
+) -> Tuple[Optional[EvidenceRankingData], List[RankedEvidence]]:
+    """Runs Gap 1 hybrid BM25 + semantic RRF + cross-encoder + NLI ranking on retrieved text."""
+    candidates = _split_passage_into_candidates(source)
+    if not candidates:
+        return None, []
+
+    try:
+        summary = rank_and_verify_evidence(
+            claim_text=claim.claim_text,
+            candidates=candidates,
+            top_k=3,
+            use_embeddings=False,
+            use_llm_nli=False,
+        )
+    except Exception as exc:
+        print(f"Gap 1 evidence ranking skipped due to error: {exc}")
+        return None, []
+
+    top = summary.top_evidence
+    ranked_items = [
+        RankedEvidenceItem(
+            passage_id=item.passage_id,
+            text=item.text,
+            bm25_score=item.bm25_score,
+            semantic_score=item.semantic_score,
+            hybrid_rrf_score=item.hybrid_rrf_score,
+            cross_encoder_score=item.cross_encoder_score,
+            logical_stance=item.logical_stance.value,
+            stance_confidence=item.stance_confidence.value,
+            similarity_trap=item.similarity_trap,
+            stance_rationale=item.stance_rationale,
+        )
+        for item in summary.ranked_candidates
+    ]
+
+    ranking_data = EvidenceRankingData(
+        embedding_backend=summary.embedding_backend,
+        nli_backend=summary.nli_backend,
+        recommended_verdict=summary.recommended_verdict,
+        similarity_trap_detected=summary.similarity_trap_detected,
+        top_passage_text=top.text if top else None,
+        top_bm25_score=top.bm25_score if top else 0.0,
+        top_semantic_score=top.semantic_score if top else 0.0,
+        top_rrf_score=top.hybrid_rrf_score if top else 0.0,
+        top_cross_encoder_score=top.cross_encoder_score if top else 0.0,
+        top_logical_stance=top.logical_stance.value if top else "NEUTRAL",
+        explanation=summary.explanation,
+        ranked_candidates=ranked_items,
+    )
+    return ranking_data, summary.ranked_candidates
+
+
+def _attach_gap2_decomposition(
+    claim: ExtractedClaim,
+    source: RetrievedSource,
+    result: ClaimVerificationResult,
 ) -> ClaimVerificationResult:
-    """Compares one extracted claim against its retrieved source and returns a calibrated verdict."""
+    """Runs Gap 2 atomic claim decomposition and evaluates each proposition independently."""
+    try:
+        decomposed = decompose_claim(claim, use_llm=False)
+        if not decomposed.is_compound:
+            result.claim_decomposition = ClaimDecompositionData(
+                is_compound=False,
+                decomposition_method=decomposed.decomposition_method,
+                overall_verdict=result.verdict,
+                overall_confidence=result.confidence,
+                summary_explanation="Single atomic claim; no multi-proposition split required.",
+                propositions=[
+                    AtomicPropositionResult(
+                        proposition_id=prop.proposition_id,
+                        proposition_text=prop.text,
+                        verdict=result.verdict,
+                        confidence=result.confidence,
+                        explanation=result.explanation,
+                        preserved_qualifiers=list(prop.preserved_qualifiers),
+                        mismatch_flags=list(result.mismatch_flags),
+                    )
+                    for prop in decomposed.propositions
+                ],
+            )
+            return result
+
+        candidates = _split_passage_into_candidates(source)
+        prop_verdicts: List[PropositionVerdict] = []
+        qualifiers_map = {
+            prop.proposition_id: list(prop.preserved_qualifiers)
+            for prop in decomposed.propositions
+        }
+
+        for prop in decomposed.propositions:
+            if source.is_retracted:
+                prop_verdicts.append(
+                    PropositionVerdict(
+                        proposition_id=prop.proposition_id,
+                        proposition_text=prop.text,
+                        verdict=ClaimStatus.POTENTIALLY_OUTDATED,
+                        confidence=ConfidenceLevel.HIGH,
+                        explanation="Cited publication has been formally retracted.",
+                        mismatch_flags=["RETRACTED_SOURCE"],
+                    )
+                )
+            elif not source.found or not candidates:
+                prop_verdicts.append(
+                    PropositionVerdict(
+                        proposition_id=prop.proposition_id,
+                        proposition_text=prop.text,
+                        verdict=ClaimStatus.UNSUPPORTED,
+                        confidence=ConfidenceLevel.LOW,
+                        explanation="No accessible source passage available to verify this proposition.",
+                        mismatch_flags=["NO_SOURCE_PASSAGE"],
+                    )
+                )
+            else:
+                ev_summary = rank_and_verify_evidence(
+                    claim_text=prop.text,
+                    candidates=candidates,
+                    top_k=2,
+                    use_embeddings=False,
+                    use_llm_nli=False,
+                )
+                top_ev = ev_summary.top_evidence
+                prop_flags = list(top_ev.diagnostic_flags) if top_ev else []
+                prop_verdicts.append(
+                    PropositionVerdict(
+                        proposition_id=prop.proposition_id,
+                        proposition_text=prop.text,
+                        verdict=ev_summary.recommended_verdict,
+                        confidence=ev_summary.recommended_confidence,
+                        explanation=top_ev.stance_rationale if top_ev else ev_summary.explanation,
+                        mismatch_flags=prop_flags,
+                    )
+                )
+
+        combined = combine_proposition_verdicts(claim, prop_verdicts)
+
+        for flag in combined.mismatch_flags:
+            if flag == "PARTIAL_CONTRADICTION" and flag not in result.mismatch_flags:
+                result.mismatch_flags.append(flag)
+
+        result.claim_decomposition = ClaimDecompositionData(
+            is_compound=True,
+            decomposition_method=decomposed.decomposition_method,
+            overall_verdict=combined.overall_verdict,
+            overall_confidence=combined.overall_confidence,
+            summary_explanation=combined.summary_explanation,
+            propositions=[
+                AtomicPropositionResult(
+                    proposition_id=pv.proposition_id,
+                    proposition_text=pv.proposition_text,
+                    verdict=pv.verdict,
+                    confidence=pv.confidence,
+                    explanation=pv.explanation,
+                    preserved_qualifiers=qualifiers_map.get(pv.proposition_id, []),
+                    mismatch_flags=list(pv.mismatch_flags),
+                )
+                for pv in combined.proposition_verdicts
+            ],
+        )
+    except Exception as exc:
+        print(f"Gap 2 claim decomposition skipped due to error: {exc}")
+    return result
+
+
+def _attach_gap3_temporal_tracking(
+    claim: ExtractedClaim,
+    source: RetrievedSource,
+    result: ClaimVerificationResult,
+) -> ClaimVerificationResult:
+    """Runs Gap 3 time-aware citation & consensus tracking without altering historical verdict."""
+    if not source.found:
+        return result
+
+    try:
+        clean_doi = _extract_clean_doi(claim, source)
+        skip_live = os.getenv("DISABLE_LIVE_TEMPORAL_FETCH", "0") == "1"
+
+        if not skip_live and (clean_doi or source.title):
+            profile = fetch_temporal_profile_live(
+                doi=clean_doi,
+                title=source.title,
+                timeout=4.5,
+                max_citing_works=6,
+            )
+        else:
+            profile = TemporalCitationProfile(
+                title=source.title or "Unknown Source",
+                doi=clean_doi,
+                publication_year=source.year,
+                publication_stage=(
+                    PublicationStage.RETRACTED
+                    if source.is_retracted
+                    else PublicationStage.UNKNOWN
+                ),
+                is_retracted=source.is_retracted,
+            )
+
+        # Ensure known retriever metadata is preserved even if live lookup times out
+        if profile.publication_year is None and source.year is not None:
+            profile.publication_year = source.year
+        if source.is_retracted:
+            profile.is_retracted = True
+            profile.publication_stage = PublicationStage.RETRACTED
+
+        assessment = assess_temporal_validity(
+            profile=profile,
+            historical_verdict=result.verdict,
+        )
+
+        result.temporal_assessment = TemporalAssessmentData(
+            historical_claim_verdict=assessment.historical_claim_verdict,
+            replaces_historical_verdict=assessment.replaces_historical_verdict,
+            temporal_status=assessment.temporal_status.value,
+            cited_publication_year=assessment.cited_publication_year,
+            citation_age_years=assessment.citation_age_years,
+            publication_stage=assessment.publication_stage.value,
+            has_newer_journal_version=assessment.has_newer_journal_version,
+            has_correction=assessment.has_correction,
+            is_retracted=assessment.is_retracted,
+            subsequent_citation_count=assessment.subsequent_citation_count,
+            confirming_studies_count=assessment.confirming_studies_count,
+            challenging_studies_count=assessment.challenging_studies_count,
+            systematic_reviews_count=assessment.systematic_reviews_count,
+            chronological_timeline=list(assessment.chronological_timeline[:6]),
+            temporal_summary=assessment.temporal_summary,
+            temporal_flags=list(assessment.temporal_flags),
+            needs_temporal_review=assessment.needs_temporal_review,
+        )
+    except Exception as exc:
+        print(f"Gap 3 temporal tracking skipped due to error: {exc}")
+    return result
+
+
+def _attach_gap4_uncertainty(
+    result: ClaimVerificationResult,
+    source: RetrievedSource,
+    ranked_candidates: List[RankedEvidence],
+) -> ClaimVerificationResult:
+    """Runs Gap 4 uncertainty calibration & abstention policy on any ClaimVerificationResult."""
+    try:
+        decision = calibrate_verification_result(
+            result,
+            source_accessible=source.found,
+            evidence_scope=source.evidence_scope,
+            ranked_evidence=ranked_candidates,
+        )
+        result.uncertainty_calibration = UncertaintyCalibrationData(
+            action=decision.action.value,
+            calibrated_confidence=decision.calibrated_confidence,
+            calibrated_probability=decision.calibrated_probability,
+            evidence_coverage_score=decision.signals.evidence_coverage_score,
+            retrieval_confidence=decision.signals.retrieval_confidence,
+            passage_agreement_score=decision.signals.passage_agreement_score,
+            composite_reliability_score=decision.signals.composite_reliability_score,
+            has_conflicting_passages=decision.signals.has_conflicting_passages,
+            abstained=decision.abstained,
+            user_message=decision.user_message,
+            uncertainty_flags=list(decision.uncertainty_flags),
+        )
+        if decision.needs_human_review:
+            result.needs_human_review = True
+    except Exception as exc:
+        print(f"Gap 4 uncertainty calibration skipped due to error: {exc}")
+    return result
+
+
+def _verify_single_claim_core(
+    claim: ExtractedClaim,
+    source: RetrievedSource,
+    evidence_ranking: Optional[EvidenceRankingData],
+) -> ClaimVerificationResult:
+    """Core verification logic producing the base ClaimVerificationResult."""
     citation_label = _format_citation(claim, source)
     flags = list(source.mismatch_flags)
+
+    if (
+        evidence_ranking
+        and evidence_ranking.similarity_trap_detected
+        and "SIMILARITY_TRAP_CONTRADICTION" not in flags
+    ):
+        flags.append("SIMILARITY_TRAP_CONTRADICTION")
 
     # Rule 1: Paper not found in open scholarly indexes - never fabricate verification
     if not source.found:
@@ -98,6 +478,7 @@ def verify_single_claim(
             needs_human_review=True,
             source_url=source.doi_url,
             mismatch_flags=flags,
+            evidence_ranking=evidence_ranking,
         )
 
     # Rule 2: Retracted source - immediately flag as potentially outdated / invalid
@@ -122,6 +503,7 @@ def verify_single_claim(
             needs_human_review=True,
             source_url=source.doi_url,
             mismatch_flags=flags,
+            evidence_ranking=evidence_ranking,
         )
 
     # Rule 3: Source found, but no abstract/full-text passage was retrievable (e.g. strict paywall)
@@ -146,6 +528,7 @@ def verify_single_claim(
             needs_human_review=True,
             source_url=source.doi_url,
             mismatch_flags=flags,
+            evidence_ranking=evidence_ranking,
         )
 
     # Rule 4: Compare claim against retrieved passage using Gemini Structured JSON
@@ -163,6 +546,7 @@ def verify_single_claim(
             needs_human_review=True,
             source_url=source.doi_url,
             mismatch_flags=flags,
+            evidence_ranking=evidence_ranking,
         )
 
     prompt = f"""You are a rigorous scientific integrity auditor for CiteVerify.
@@ -219,7 +603,6 @@ HONEST UNCERTAINTY RULES:
                 f"Gemini API error (attempt {attempt_idx}/{len(RETRY_SCHEDULE)}, "
                 f"model={model_name}, code={status_code}): {exc}"
             )
-            # Don't waste retries on the same model if it returned a hard 4xx (not 429)
             if status_code in (400, 403, 404):
                 blocked_models.add(model_name)
                 continue
@@ -244,9 +627,9 @@ HONEST UNCERTAINTY RULES:
             needs_human_review=True,
             source_url=source.doi_url,
             mismatch_flags=flags,
+            evidence_ranking=evidence_ranking,
         )
 
-    # Calibrate uncertainty honestly for paywalled / abstract-only evidence
     calibrated_confidence = llm_result.confidence
     needs_review = llm_result.needs_human_review
     uncertainty_note = llm_result.uncertainty_note
@@ -272,7 +655,21 @@ HONEST UNCERTAINTY RULES:
         needs_human_review=needs_review,
         source_url=source.doi_url,
         mismatch_flags=combined_flags,
+        evidence_ranking=evidence_ranking,
     )
+
+
+def verify_single_claim(
+    claim: ExtractedClaim,
+    source: RetrievedSource,
+) -> ClaimVerificationResult:
+    """Compares one extracted claim against its retrieved source with Gaps 1, 2, 3 & 4."""
+    evidence_ranking, ranked_candidates = _run_gap1_evidence_ranking(claim, source)
+    result = _verify_single_claim_core(claim, source, evidence_ranking)
+    result = _attach_gap2_decomposition(claim, source, result)
+    result = _attach_gap3_temporal_tracking(claim, source, result)
+    result = _attach_gap4_uncertainty(result, source, ranked_candidates)
+    return result
 
 
 def build_verification_report(

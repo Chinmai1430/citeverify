@@ -44,6 +44,9 @@ import {
   Code2,
   Layers,
   ChevronRight,
+  ChevronDown,
+  GitBranch,
+  Gauge,
   Plus,
   Server,
   Filter,
@@ -66,6 +69,87 @@ export type ClaimStatus =
 
 export type ConfidenceLevel = "HIGH" | "MEDIUM" | "LOW";
 
+export interface RankedEvidenceItem {
+  passage_id: string;
+  text: string;
+  bm25_score: number;
+  semantic_score: number;
+  hybrid_rrf_score: number;
+  cross_encoder_score: number;
+  logical_stance: string;
+  stance_confidence: string;
+  similarity_trap: boolean;
+  stance_rationale: string;
+}
+
+export interface EvidenceRankingData {
+  embedding_backend: string;
+  nli_backend: string;
+  recommended_verdict: ClaimStatus;
+  similarity_trap_detected: boolean;
+  top_passage_text?: string | null;
+  top_bm25_score: number;
+  top_semantic_score: number;
+  top_rrf_score: number;
+  top_cross_encoder_score: number;
+  top_logical_stance: string;
+  explanation: string;
+  ranked_candidates: RankedEvidenceItem[];
+}
+
+export interface AtomicPropositionResult {
+  proposition_id: string;
+  proposition_text: string;
+  verdict: ClaimStatus;
+  confidence: ConfidenceLevel;
+  explanation: string;
+  preserved_qualifiers: string[];
+  mismatch_flags: string[];
+}
+
+export interface ClaimDecompositionData {
+  is_compound: boolean;
+  decomposition_method: string;
+  overall_verdict: ClaimStatus;
+  overall_confidence: ConfidenceLevel;
+  summary_explanation: string;
+  propositions: AtomicPropositionResult[];
+}
+
+export interface TemporalAssessmentData {
+  historical_claim_verdict: ClaimStatus;
+  replaces_historical_verdict: boolean;
+  temporal_status: string;
+  cited_publication_year?: number | null;
+  citation_age_years?: number | null;
+  publication_stage: string;
+  has_newer_journal_version: boolean;
+  has_correction: boolean;
+  is_retracted: boolean;
+  subsequent_citation_count: number;
+  confirming_studies_count: number;
+  challenging_studies_count: number;
+  systematic_reviews_count: number;
+  chronological_timeline: string[];
+  temporal_summary: string;
+  temporal_flags: string[];
+  needs_temporal_review: boolean;
+}
+
+export interface UncertaintyCalibrationData {
+  action: string;
+  calibrated_confidence: ConfidenceLevel;
+  calibrated_probability: number;
+  evidence_coverage_score: number;
+  retrieval_confidence: number;
+  passage_agreement_score: number;
+  composite_reliability_score: number;
+  has_conflicting_passages: boolean;
+  abstained: boolean;
+  user_message: string;
+  uncertainty_flags: string[];
+}
+
 export interface ClaimVerificationResult {
   claim_id: number;
   claim_text: string;
@@ -78,6 +162,11 @@ export interface ClaimVerificationResult {
   needs_human_review: boolean;
   source_url?: string | null;
   mismatch_flags: string[];
+  // Gaps 1-4 (Optional for backwards compatibility with older Cloud History)
+  evidence_ranking?: EvidenceRankingData | null;
+  claim_decomposition?: ClaimDecompositionData | null;
+  temporal_assessment?: TemporalAssessmentData | null;
+  uncertainty_calibration?: UncertaintyCalibrationData | null;
 }
 
 export interface VerificationReport {
@@ -97,6 +186,7 @@ type InputMode = "pdf" | "text";
 type VerdictFilter = "ALL" | ClaimStatus;
 type NavView = "verify" | "report" | "history" | "settings";
 type AuthMode = "signin" | "signup";
+type GapTab = "gap1" | "gap2" | "gap3" | "gap4";
 
 interface AuthSession {
   userId: string | null;
@@ -150,23 +240,23 @@ const ALL_STATUSES: ClaimStatus[] = [
 const VERIFICATION_PIPELINE_STEPS = [
   {
     id: 0,
-    title: "Parsing Claims",
-    detail: "Extracting assertions, inline markers, and bibliography entries",
+    title: "Parsing & Decomposing",
+    detail: "Extracting claims, citations, and atomic sub-propositions (Gap 2)",
   },
   {
     id: 1,
-    title: "Retrieving Sources",
-    detail: "Resolving DOIs, abstracts, and metadata from academic indices",
+    title: "Retrieving & Ranking",
+    detail: "Resolving DOIs + BM25/Semantic RRF & NLI reranking (Gap 1)",
   },
   {
     id: 2,
-    title: "Cross-Checking Evidence",
-    detail: "Evaluating semantic alignment, retractions, and temporal validity",
+    title: "Temporal Consensus",
+    detail: "Tracking retractions, versions, and citing studies (Gap 3)",
   },
   {
     id: 3,
-    title: "Compiling Report",
-    detail: "Assigning verdicts, confidence scores, and human-review flags",
+    title: "Calibrating Uncertainty",
+    detail: "Scoring coverage, agreement, and abstention policy (Gap 4)",
   },
 ] as const;
 
@@ -252,13 +342,68 @@ const CONFIDENCE_CONFIG: Record<
   },
 };
 
+const TEMPORAL_STATUS_META: Record<
+  string,
+  { label: string; badgeClass: string; isAlert: boolean }
+> = {
+  CONSENSUS_ALIGNED: {
+    label: "Consensus Aligned",
+    badgeClass: "border-emerald-500/30 bg-emerald-500/12 text-emerald-300",
+    isAlert: false,
+  },
+  SUPERSEDED_OR_CHALLENGED: {
+    label: "Superseded / Challenged",
+    badgeClass: "border-rose-500/35 bg-rose-500/12 text-rose-300",
+    isAlert: true,
+  },
+  RETRACTED: {
+    label: "Retracted",
+    badgeClass: "border-rose-500/40 bg-rose-500/15 text-rose-200",
+    isAlert: true,
+  },
+  CORRECTED_OR_UPDATED: {
+    label: "Corrected / Updated",
+    badgeClass: "border-amber-500/35 bg-amber-500/12 text-amber-200",
+    isAlert: true,
+  },
+  STALE_NEEDS_UPDATE: {
+    label: "Aging · Check Updates",
+    badgeClass: "border-orange-500/35 bg-orange-500/12 text-orange-200",
+    isAlert: true,
+  },
+  INSUFFICIENT_TEMPORAL_DATA: {
+    label: "Limited Temporal Data",
+    badgeClass: "border-slate-500/35 bg-slate-500/12 text-slate-300",
+    isAlert: false,
+  },
+};
+
+const CALIBRATION_ACTION_META: Record<
+  string,
+  { label: string; badgeClass: string }
+> = {
+  PRESENT_VERDICT: {
+    label: "Auto-Verified",
+    badgeClass: "border-emerald-500/30 bg-emerald-500/12 text-emerald-300",
+  },
+  FLAG_FOR_REVIEW: {
+    label: "Flag for Review",
+    badgeClass: "border-amber-500/35 bg-amber-500/12 text-amber-200",
+  },
+  ABSTAIN: {
+    label: "Abstained",
+    badgeClass: "border-fuchsia-500/35 bg-fuchsia-500/12 text-fuchsia-200",
+  },
+  MARK_UNVERIFIABLE: {
+    label: "Unverifiable",
+    badgeClass: "border-slate-500/35 bg-slate-500/12 text-slate-300",
+  },
+};
+
 // ============================================================================
 // 4. Environment, Normalization, Auth & Storage Helpers
 // ============================================================================
 
-/**
- * Safely resolves VITE_API_URL in both Vite runtime and standalone preview environments.
- */
 function resolveEnvApiUrl(): string {
   try {
     const envObj = (
@@ -274,8 +419,173 @@ function resolveEnvApiUrl(): string {
   return DEFAULT_API_URL;
 }
 
+function asVerdict(val: unknown): ClaimStatus {
+  const s = String(val ?? "UNSUPPORTED").toUpperCase();
+  return (ALL_STATUSES as string[]).includes(s)
+    ? (s as ClaimStatus)
+    : "UNSUPPORTED";
+}
+
+function asConfidence(val: unknown): ConfidenceLevel {
+  const s = String(val ?? "LOW").toUpperCase();
+  return s === "HIGH" || s === "MEDIUM" || s === "LOW" ? s : "LOW";
+}
+
+function asNum(val: unknown, fallback = 0): number {
+  const n = Number(val);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function asStrArray(val: unknown): string[] {
+  return Array.isArray(val)
+    ? val.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function normalizeEvidenceRanking(raw: unknown): EvidenceRankingData | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const rawCands = Array.isArray(o.ranked_candidates)
+    ? o.ranked_candidates
+    : [];
+  const ranked_candidates: RankedEvidenceItem[] = rawCands
+    .filter((c): c is Record<string, unknown> =>
+      Boolean(c && typeof c === "object"),
+    )
+    .map((c, i) => ({
+      passage_id:
+        typeof c.passage_id === "string" ? c.passage_id : `p_${i + 1}`,
+      text: typeof c.text === "string" ? c.text : "",
+      bm25_score: asNum(c.bm25_score),
+      semantic_score: asNum(c.semantic_score),
+      hybrid_rrf_score: asNum(c.hybrid_rrf_score),
+      cross_encoder_score: asNum(c.cross_encoder_score),
+      logical_stance:
+        typeof c.logical_stance === "string" ? c.logical_stance : "NEUTRAL",
+      stance_confidence:
+        typeof c.stance_confidence === "string" ? c.stance_confidence : "LOW",
+      similarity_trap: Boolean(c.similarity_trap),
+      stance_rationale:
+        typeof c.stance_rationale === "string" ? c.stance_rationale : "",
+    }));
+
+  return {
+    embedding_backend:
+      typeof o.embedding_backend === "string"
+        ? o.embedding_backend
+        : "tfidf_fallback",
+    nli_backend:
+      typeof o.nli_backend === "string" ? o.nli_backend : "rule_based_nli",
+    recommended_verdict: asVerdict(o.recommended_verdict),
+    similarity_trap_detected: Boolean(o.similarity_trap_detected),
+    top_passage_text:
+      typeof o.top_passage_text === "string" ? o.top_passage_text : null,
+    top_bm25_score: asNum(o.top_bm25_score),
+    top_semantic_score: asNum(o.top_semantic_score),
+    top_rrf_score: asNum(o.top_rrf_score),
+    top_cross_encoder_score: asNum(o.top_cross_encoder_score),
+    top_logical_stance:
+      typeof o.top_logical_stance === "string"
+        ? o.top_logical_stance
+        : "NEUTRAL",
+    explanation: typeof o.explanation === "string" ? o.explanation : "",
+    ranked_candidates,
+  };
+}
+
+function normalizeClaimDecomposition(
+  raw: unknown,
+): ClaimDecompositionData | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const rawProps = Array.isArray(o.propositions) ? o.propositions : [];
+  const propositions: AtomicPropositionResult[] = rawProps
+    .filter((p): p is Record<string, unknown> =>
+      Boolean(p && typeof p === "object"),
+    )
+    .map((p, i) => ({
+      proposition_id:
+        typeof p.proposition_id === "string" ? p.proposition_id : `1.${i + 1}`,
+      proposition_text:
+        typeof p.proposition_text === "string" ? p.proposition_text : "",
+      verdict: asVerdict(p.verdict),
+      confidence: asConfidence(p.confidence),
+      explanation: typeof p.explanation === "string" ? p.explanation : "",
+      preserved_qualifiers: asStrArray(p.preserved_qualifiers),
+      mismatch_flags: asStrArray(p.mismatch_flags),
+    }));
+
+  return {
+    is_compound: Boolean(o.is_compound),
+    decomposition_method:
+      typeof o.decomposition_method === "string"
+        ? o.decomposition_method
+        : "rule_based",
+    overall_verdict: asVerdict(o.overall_verdict),
+    overall_confidence: asConfidence(o.overall_confidence),
+    summary_explanation:
+      typeof o.summary_explanation === "string" ? o.summary_explanation : "",
+    propositions,
+  };
+}
+
+function normalizeTemporalAssessment(
+  raw: unknown,
+): TemporalAssessmentData | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  return {
+    historical_claim_verdict: asVerdict(o.historical_claim_verdict),
+    replaces_historical_verdict: Boolean(o.replaces_historical_verdict),
+    temporal_status:
+      typeof o.temporal_status === "string"
+        ? o.temporal_status
+        : "INSUFFICIENT_TEMPORAL_DATA",
+    cited_publication_year:
+      typeof o.cited_publication_year === "number"
+        ? o.cited_publication_year
+        : null,
+    citation_age_years:
+      typeof o.citation_age_years === "number" ? o.citation_age_years : null,
+    publication_stage:
+      typeof o.publication_stage === "string" ? o.publication_stage : "UNKNOWN",
+    has_newer_journal_version: Boolean(o.has_newer_journal_version),
+    has_correction: Boolean(o.has_correction),
+    is_retracted: Boolean(o.is_retracted),
+    subsequent_citation_count: asNum(o.subsequent_citation_count),
+    confirming_studies_count: asNum(o.confirming_studies_count),
+    challenging_studies_count: asNum(o.challenging_studies_count),
+    systematic_reviews_count: asNum(o.systematic_reviews_count),
+    chronological_timeline: asStrArray(o.chronological_timeline),
+    temporal_summary:
+      typeof o.temporal_summary === "string" ? o.temporal_summary : "",
+    temporal_flags: asStrArray(o.temporal_flags),
+    needs_temporal_review: Boolean(o.needs_temporal_review),
+  };
+}
+
+function normalizeUncertaintyCalibration(
+  raw: unknown,
+): UncertaintyCalibrationData | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  return {
+    action: typeof o.action === "string" ? o.action : "FLAG_FOR_REVIEW",
+    calibrated_confidence: asConfidence(o.calibrated_confidence),
+    calibrated_probability: asNum(o.calibrated_probability),
+    evidence_coverage_score: asNum(o.evidence_coverage_score),
+    retrieval_confidence: asNum(o.retrieval_confidence),
+    passage_agreement_score: asNum(o.passage_agreement_score, 0.5),
+    composite_reliability_score: asNum(o.composite_reliability_score),
+    has_conflicting_passages: Boolean(o.has_conflicting_passages),
+    abstained: Boolean(o.abstained),
+    user_message: typeof o.user_message === "string" ? o.user_message : "",
+    uncertainty_flags: asStrArray(o.uncertainty_flags),
+  };
+}
+
 /**
- * Normalizes a live /api/verify JSON payload strictly against VerificationReport.
+ * Normalizes a live /api/verify JSON payload strictly against VerificationReport (including Gaps 1-4).
  */
 function normalizeReport(raw: unknown): VerificationReport {
   const data = (raw && typeof raw === "object" ? raw : {}) as Record<
@@ -289,18 +599,6 @@ function normalizeReport(raw: unknown): VerificationReport {
       string,
       unknown
     >;
-    const rawVerdict = String(r.verdict ?? "UNSUPPORTED").toUpperCase();
-    const verdict: ClaimStatus = (ALL_STATUSES as string[]).includes(rawVerdict)
-      ? (rawVerdict as ClaimStatus)
-      : "UNSUPPORTED";
-
-    const rawConfidence = String(r.confidence ?? "LOW").toUpperCase();
-    const confidence: ConfidenceLevel =
-      rawConfidence === "HIGH" ||
-      rawConfidence === "MEDIUM" ||
-      rawConfidence === "LOW"
-        ? rawConfidence
-        : "LOW";
 
     return {
       claim_id: typeof r.claim_id === "number" ? r.claim_id : idx + 1,
@@ -309,17 +607,21 @@ function normalizeReport(raw: unknown): VerificationReport {
         typeof r.matched_citation === "string" ? r.matched_citation : null,
       evidence_passage:
         typeof r.evidence_passage === "string" ? r.evidence_passage : null,
-      verdict,
+      verdict: asVerdict(r.verdict),
       explanation: typeof r.explanation === "string" ? r.explanation : "",
-      confidence,
+      confidence: asConfidence(r.confidence),
       uncertainty_note:
         typeof r.uncertainty_note === "string" ? r.uncertainty_note : "",
       needs_human_review:
         typeof r.needs_human_review === "boolean" ? r.needs_human_review : true,
       source_url: typeof r.source_url === "string" ? r.source_url : null,
-      mismatch_flags: Array.isArray(r.mismatch_flags)
-        ? r.mismatch_flags.filter((f): f is string => typeof f === "string")
-        : [],
+      mismatch_flags: asStrArray(r.mismatch_flags),
+      evidence_ranking: normalizeEvidenceRanking(r.evidence_ranking),
+      claim_decomposition: normalizeClaimDecomposition(r.claim_decomposition),
+      temporal_assessment: normalizeTemporalAssessment(r.temporal_assessment),
+      uncertainty_calibration: normalizeUncertaintyCalibration(
+        r.uncertainty_calibration,
+      ),
     };
   });
 
@@ -336,10 +638,6 @@ function normalizeReport(raw: unknown): VerificationReport {
     }
   }
 
-  const limitations = Array.isArray(data.limitations)
-    ? data.limitations.filter((l): l is string => typeof l === "string")
-    : [];
-
   return {
     document_title:
       typeof data.document_title === "string" &&
@@ -352,13 +650,10 @@ function normalizeReport(raw: unknown): VerificationReport {
         : results.length,
     summary_counts,
     results,
-    limitations,
+    limitations: asStrArray(data.limitations),
   };
 }
 
-/**
- * Computes normalized counts across all 5 ClaimStatus buckets from a report.
- */
 function computeStatusCounts(
   report: VerificationReport,
 ): Record<ClaimStatus, number> {
@@ -385,9 +680,6 @@ function computeStatusCounts(
   return counts;
 }
 
-/**
- * Maps an authenticated Supabase User into the UI AuthSession shape.
- */
 function mapSupabaseUser(user: SupabaseUser): AuthSession {
   const email = user.email || "researcher@citeverify.app";
   const metadata = (user.user_metadata || {}) as Record<string, unknown>;
@@ -412,9 +704,6 @@ function mapSupabaseUser(user: SupabaseUser): AuthSession {
   };
 }
 
-/**
- * Safely reads persisted local session history (fallback when Supabase is unconfigured).
- */
 function loadLocalSessionHistory(): SessionHistoryEntry[] {
   try {
     const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
@@ -432,6 +721,7 @@ function loadLocalSessionHistory(): SessionHistoryEntry[] {
       )
       .map((item) => ({
         ...item,
+        report: normalizeReport(item.report),
         syncedToCloud: Boolean(item.syncedToCloud),
       }));
   } catch {
@@ -472,6 +762,18 @@ function formatTimestamp(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+function formatPercent(val: number): string {
+  return `${Math.round(Math.min(1, Math.max(0, val)) * 100)}%`;
+}
+
+function formatStageLabel(stage: string): string {
+  return stage
+    .toLowerCase()
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
 }
 
 // ============================================================================
@@ -579,7 +881,6 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
 
     setSubmittingVia("email");
 
-    // Local fallback when Supabase env vars are not configured
     if (!supabase || !isSupabaseConfigured) {
       window.setTimeout(() => {
         setSubmittingVia(null);
@@ -694,7 +995,6 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
 
   return (
     <div className="relative flex min-h-screen w-full flex-col justify-between overflow-hidden bg-[#070711] text-slate-100 selection:bg-violet-500/30 selection:text-violet-100">
-      {/* Ambient Aurora Violet, Indigo & Cyan Radial Glows */}
       <div
         aria-hidden="true"
         className="pointer-events-none fixed inset-0 overflow-hidden"
@@ -716,7 +1016,6 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
         />
       </div>
 
-      {/* Minimal Top Bar */}
       <header className="relative z-10 mx-auto flex w-full max-w-6xl items-center justify-between px-5 pt-6 sm:px-8">
         <div className="flex items-center gap-3">
           <BrandBadge size="md" />
@@ -762,17 +1061,14 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
         </div>
       </header>
 
-      {/* Centered Frosted-Glass Login / Sign-Up Card */}
       <main className="relative z-10 flex flex-1 items-center justify-center px-4 py-10">
         <div className="w-full max-w-md">
           <div className="relative rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-7 sm:p-9 shadow-[0_28px_90px_-18px_rgba(0,0,0,0.9),0_0_65px_-22px_rgba(139,92,246,0.35)] ring-1 ring-violet-400/15 backdrop-blur-2xl">
-            {/* Specular Aurora Hairline */}
             <div
               aria-hidden="true"
               className="pointer-events-none absolute inset-x-10 top-0 h-px bg-gradient-to-r from-transparent via-violet-400/70 to-transparent"
             />
 
-            {/* Header */}
             <div className="mb-6 text-center">
               <div className="mb-4 flex justify-center">
                 <BrandBadge size="lg" />
@@ -789,7 +1085,6 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
               </p>
             </div>
 
-            {/* Sign In / Create Account Mode Toggle */}
             <div className="mb-5 grid grid-cols-2 rounded-xl border border-white/10 bg-black/35 p-1">
               <button
                 type="button"
@@ -821,7 +1116,6 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
               </button>
             </div>
 
-            {/* Inline Validation / Notice */}
             {formNotice && (
               <div
                 role="alert"
@@ -842,7 +1136,6 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
               </div>
             )}
 
-            {/* Email & Password Form */}
             <form onSubmit={handleEmailAuth} className="space-y-4" noValidate>
               {authMode === "signup" && (
                 <div className="space-y-1.5">
@@ -951,7 +1244,6 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                 </div>
               </div>
 
-              {/* Primary Aurora Violet CTA */}
               <button
                 type="submit"
                 disabled={submittingVia !== null}
@@ -977,7 +1269,6 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
               </button>
             </form>
 
-            {/* Clean Divider */}
             <div className="relative my-6 flex items-center justify-center">
               <div className="h-px flex-1 bg-gradient-to-r from-transparent via-white/12 to-white/12" />
               <span className="px-3 text-[11px] font-medium uppercase tracking-widest text-slate-500">
@@ -986,7 +1277,6 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
               <div className="h-px flex-1 bg-gradient-to-l from-transparent via-white/12 to-white/12" />
             </div>
 
-            {/* Continue with Google Button */}
             <button
               type="button"
               onClick={handleGoogleSignIn}
@@ -1017,8 +1307,32 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
 };
 
 // ============================================================================
-// 7. Claim Verification Card (Report Viewer)
+// 7. Claim Verification Card (Report Viewer + Interactive Gaps 1-4 Inspector)
 // ============================================================================
+
+const MetricBar: React.FC<{
+  label: string;
+  value: number;
+  colorClass: string;
+}> = ({ label, value, colorClass }) => {
+  const clamped = Math.min(1, Math.max(0, value));
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-slate-400">{label}</span>
+        <span className="font-mono font-semibold text-slate-200">
+          {formatPercent(clamped)}
+        </span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.07]">
+        <div
+          style={{ width: `${Math.round(clamped * 100)}%` }}
+          className={`h-full rounded-full transition-all ${colorClass}`}
+        />
+      </div>
+    </div>
+  );
+};
 
 const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({
   item,
@@ -1027,6 +1341,27 @@ const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({
   const confidenceMeta =
     CONFIDENCE_CONFIG[item.confidence] ?? CONFIDENCE_CONFIG.LOW;
   const StatusIcon = statusMeta.icon;
+
+  const [openGapTab, setOpenGapTab] = useState<GapTab | null>(null);
+
+  const g1 = item.evidence_ranking ?? null;
+  const g2 = item.claim_decomposition ?? null;
+  const g3 = item.temporal_assessment ?? null;
+  const g4 = item.uncertainty_calibration ?? null;
+  const hasAnyGapData = Boolean(g1 || g2 || g3 || g4);
+
+  const temporalMeta = g3
+    ? (TEMPORAL_STATUS_META[g3.temporal_status] ??
+      TEMPORAL_STATUS_META.INSUFFICIENT_TEMPORAL_DATA)
+    : null;
+  const actionMeta = g4
+    ? (CALIBRATION_ACTION_META[g4.action] ??
+      CALIBRATION_ACTION_META.FLAG_FOR_REVIEW)
+    : null;
+
+  const toggleGapTab = (tab: GapTab) => {
+    setOpenGapTab((prev) => (prev === tab ? null : tab));
+  };
 
   return (
     <article
@@ -1049,6 +1384,42 @@ const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({
           >
             {confidenceMeta.label}
           </span>
+
+          {/* Live Gap 4 Calibrated Probability & Policy Badge */}
+          {g4 && actionMeta && (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium ${actionMeta.badgeClass}`}
+            >
+              <Gauge className="h-3 w-3" />
+              {formatPercent(g4.calibrated_probability)} · {actionMeta.label}
+            </span>
+          )}
+
+          {/* Live Gap 1 Similarity Trap Badge */}
+          {g1?.similarity_trap_detected && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/40 bg-rose-500/15 px-2.5 py-0.5 text-xs font-medium text-rose-200">
+              <AlertTriangle className="h-3 w-3" />
+              Similarity Trap
+            </span>
+          )}
+
+          {/* Live Gap 2 Compound Claim Badge */}
+          {g2?.is_compound && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-violet-400/35 bg-violet-500/15 px-2.5 py-0.5 text-xs font-medium text-violet-200">
+              <GitBranch className="h-3 w-3" />
+              Compound ({g2.propositions.length} Parts)
+            </span>
+          )}
+
+          {/* Live Gap 3 Temporal Consensus Badge */}
+          {g3 && temporalMeta && (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium ${temporalMeta.badgeClass}`}
+            >
+              <Clock className="h-3 w-3" />
+              {temporalMeta.label}
+            </span>
+          )}
         </div>
 
         {item.needs_human_review && (
@@ -1060,9 +1431,22 @@ const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({
       </div>
 
       {/* Prominent Claim Text */}
-      <h3 className="mb-5 text-[15px] font-medium leading-relaxed text-white sm:text-base">
+      <h3 className="mb-4 text-[15px] font-medium leading-relaxed text-white sm:text-base">
         {item.claim_text}
       </h3>
+
+      {/* Gap 4 Abstention / Unverifiable Callout Banner */}
+      {g4?.abstained && g4.user_message && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-fuchsia-500/30 bg-fuchsia-500/[0.08] px-3.5 py-2.5 text-xs leading-relaxed text-fuchsia-100">
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-fuchsia-300" />
+          <div>
+            <span className="font-semibold text-fuchsia-200">
+              Uncertainty Guard ({actionMeta?.label ?? g4.action}):{" "}
+            </span>
+            {g4.user_message}
+          </div>
+        </div>
+      )}
 
       {/* Clean 2-Column Detail Grid */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -1166,6 +1550,530 @@ const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({
           )}
         </div>
       </div>
+
+      {/* ================================================================== */}
+      {/* Interactive Deep Verification Diagnostics (Gaps 1 - 4)             */}
+      {/* ================================================================== */}
+      {hasAnyGapData && (
+        <div className="mt-4 border-t border-white/[0.08] pt-4">
+          <div className="mb-2.5 flex items-center justify-between">
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-violet-300/90">
+              <Sparkles className="h-3.5 w-3.5 text-cyan-300" />
+              Deep Audit Diagnostics (Gaps 1–4)
+            </span>
+            <span className="text-[11px] text-slate-500">
+              Click any module to inspect details
+            </span>
+          </div>
+
+          {/* 4-Tile Clickable Summary Strip */}
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {/* Gap 1 Tile: Hybrid NLI Ranking */}
+            <button
+              type="button"
+              disabled={!g1}
+              onClick={() => toggleGapTab("gap1")}
+              className={`flex flex-col justify-between rounded-xl border p-3 text-left transition-all ${
+                openGapTab === "gap1"
+                  ? "border-cyan-400/55 bg-cyan-500/12 ring-1 ring-cyan-400/25"
+                  : g1
+                    ? "border-white/[0.08] bg-white/[0.02] hover:border-cyan-400/35 hover:bg-white/[0.04]"
+                    : "cursor-not-allowed border-white/[0.05] bg-black/15 opacity-50"
+              }`}
+            >
+              <div className="flex w-full items-center justify-between gap-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-cyan-300">
+                  Gap 1 · Hybrid NLI
+                </span>
+                <ChevronDown
+                  className={`h-3.5 w-3.5 text-slate-400 transition-transform ${
+                    openGapTab === "gap1" ? "rotate-180 text-cyan-300" : ""
+                  }`}
+                />
+              </div>
+              <div className="mt-1.5">
+                {g1 ? (
+                  <>
+                    <p className="text-xs font-semibold text-white">
+                      {g1.top_logical_stance}{" "}
+                      <span className="font-mono font-normal text-slate-400">
+                        · CE {g1.top_cross_encoder_score.toFixed(2)}
+                      </span>
+                    </p>
+                    <p className="mt-0.5 truncate text-[11px] text-slate-400">
+                      {g1.similarity_trap_detected
+                        ? "Similarity trap flagged"
+                        : `${g1.ranked_candidates.length} passage(s) ranked`}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-500">No passage text</p>
+                )}
+              </div>
+            </button>
+
+            {/* Gap 2 Tile: Atomic Decomposition */}
+            <button
+              type="button"
+              disabled={!g2}
+              onClick={() => toggleGapTab("gap2")}
+              className={`flex flex-col justify-between rounded-xl border p-3 text-left transition-all ${
+                openGapTab === "gap2"
+                  ? "border-violet-400/55 bg-violet-500/15 ring-1 ring-violet-400/25"
+                  : g2
+                    ? "border-white/[0.08] bg-white/[0.02] hover:border-violet-400/35 hover:bg-white/[0.04]"
+                    : "cursor-not-allowed border-white/[0.05] bg-black/15 opacity-50"
+              }`}
+            >
+              <div className="flex w-full items-center justify-between gap-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-violet-300">
+                  Gap 2 · Atomic Split
+                </span>
+                <ChevronDown
+                  className={`h-3.5 w-3.5 text-slate-400 transition-transform ${
+                    openGapTab === "gap2" ? "rotate-180 text-violet-300" : ""
+                  }`}
+                />
+              </div>
+              <div className="mt-1.5">
+                {g2 ? (
+                  <>
+                    <p className="text-xs font-semibold text-white">
+                      {g2.is_compound
+                        ? `Compound (${g2.propositions.length} parts)`
+                        : "Atomic (1 part)"}
+                    </p>
+                    <p className="mt-0.5 truncate text-[11px] text-slate-400">
+                      Overall:{" "}
+                      {STATUS_CONFIG[g2.overall_verdict]?.shortLabel ??
+                        g2.overall_verdict}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-500">Not evaluated</p>
+                )}
+              </div>
+            </button>
+
+            {/* Gap 3 Tile: Temporal Consensus */}
+            <button
+              type="button"
+              disabled={!g3}
+              onClick={() => toggleGapTab("gap3")}
+              className={`flex flex-col justify-between rounded-xl border p-3 text-left transition-all ${
+                openGapTab === "gap3"
+                  ? "border-amber-400/55 bg-amber-500/12 ring-1 ring-amber-400/25"
+                  : g3
+                    ? "border-white/[0.08] bg-white/[0.02] hover:border-amber-400/35 hover:bg-white/[0.04]"
+                    : "cursor-not-allowed border-white/[0.05] bg-black/15 opacity-50"
+              }`}
+            >
+              <div className="flex w-full items-center justify-between gap-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+                  Gap 3 · Temporal
+                </span>
+                <ChevronDown
+                  className={`h-3.5 w-3.5 text-slate-400 transition-transform ${
+                    openGapTab === "gap3" ? "rotate-180 text-amber-300" : ""
+                  }`}
+                />
+              </div>
+              <div className="mt-1.5">
+                {g3 && temporalMeta ? (
+                  <>
+                    <p className="truncate text-xs font-semibold text-white">
+                      {temporalMeta.label}
+                    </p>
+                    <p className="mt-0.5 truncate text-[11px] text-slate-400">
+                      {g3.cited_publication_year ?? "Year N/A"} ·{" "}
+                      {g3.subsequent_citation_count.toLocaleString()} cites
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-500">Source not indexed</p>
+                )}
+              </div>
+            </button>
+
+            {/* Gap 4 Tile: Uncertainty & Calibration */}
+            <button
+              type="button"
+              disabled={!g4}
+              onClick={() => toggleGapTab("gap4")}
+              className={`flex flex-col justify-between rounded-xl border p-3 text-left transition-all ${
+                openGapTab === "gap4"
+                  ? "border-emerald-400/55 bg-emerald-500/12 ring-1 ring-emerald-400/25"
+                  : g4
+                    ? "border-white/[0.08] bg-white/[0.02] hover:border-emerald-400/35 hover:bg-white/[0.04]"
+                    : "cursor-not-allowed border-white/[0.05] bg-black/15 opacity-50"
+              }`}
+            >
+              <div className="flex w-full items-center justify-between gap-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
+                  Gap 4 · Calibration
+                </span>
+                <ChevronDown
+                  className={`h-3.5 w-3.5 text-slate-400 transition-transform ${
+                    openGapTab === "gap4" ? "rotate-180 text-emerald-300" : ""
+                  }`}
+                />
+              </div>
+              <div className="mt-1.5">
+                {g4 && actionMeta ? (
+                  <>
+                    <p className="text-xs font-semibold text-white">
+                      {formatPercent(g4.calibrated_probability)} Prob{" "}
+                      <span className="font-normal text-slate-400">
+                        · {actionMeta.label}
+                      </span>
+                    </p>
+                    <p className="mt-0.5 truncate text-[11px] text-slate-400">
+                      Coverage {formatPercent(g4.evidence_coverage_score)} · Rel{" "}
+                      {formatPercent(g4.composite_reliability_score)}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-500">Not calibrated</p>
+                )}
+              </div>
+            </button>
+          </div>
+
+          {/* Expanded Panel: Gap 1 (Hybrid Evidence Ranking & NLI) */}
+          {openGapTab === "gap1" && g1 && (
+            <div className="mt-3 space-y-3 rounded-xl border border-cyan-400/25 bg-black/35 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-cyan-200">
+                  Hybrid BM25 + Semantic RRF + Cross-Encoder + NLI Ranking
+                </p>
+                <span className="font-mono text-[11px] text-slate-400">
+                  {g1.embedding_backend} · {g1.nli_backend}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
+                  <span className="block text-[10px] uppercase text-slate-400">
+                    Top BM25
+                  </span>
+                  <span className="font-mono text-sm font-semibold text-white">
+                    {g1.top_bm25_score.toFixed(3)}
+                  </span>
+                </div>
+                <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
+                  <span className="block text-[10px] uppercase text-slate-400">
+                    Semantic Sim
+                  </span>
+                  <span className="font-mono text-sm font-semibold text-white">
+                    {g1.top_semantic_score.toFixed(3)}
+                  </span>
+                </div>
+                <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
+                  <span className="block text-[10px] uppercase text-slate-400">
+                    Hybrid RRF
+                  </span>
+                  <span className="font-mono text-sm font-semibold text-white">
+                    {g1.top_rrf_score.toFixed(4)}
+                  </span>
+                </div>
+                <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
+                  <span className="block text-[10px] uppercase text-slate-400">
+                    Cross-Encoder
+                  </span>
+                  <span className="font-mono text-sm font-semibold text-cyan-200">
+                    {g1.top_cross_encoder_score.toFixed(3)}
+                  </span>
+                </div>
+              </div>
+
+              {g1.ranked_candidates.length > 0 && (
+                <div className="space-y-2">
+                  <span className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                    Top Ranked Passages
+                  </span>
+                  {g1.ranked_candidates.map((cand) => (
+                    <div
+                      key={`${item.claim_id}-${cand.passage_id}`}
+                      className={`rounded-lg border p-3 text-xs ${
+                        cand.similarity_trap
+                          ? "border-rose-500/35 bg-rose-500/[0.07]"
+                          : "border-white/[0.07] bg-white/[0.02]"
+                      }`}
+                    >
+                      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[10px] text-slate-300">
+                            {cand.passage_id}
+                          </span>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                              cand.logical_stance === "ENTAILS"
+                                ? "bg-emerald-500/15 text-emerald-300"
+                                : cand.logical_stance === "CONTRADICTS"
+                                  ? "bg-rose-500/15 text-rose-300"
+                                  : "bg-slate-500/20 text-slate-300"
+                            }`}
+                          >
+                            {cand.logical_stance}
+                          </span>
+                          {cand.similarity_trap && (
+                            <span className="rounded-full bg-rose-500/25 px-2 py-0.5 text-[10px] font-semibold text-rose-200">
+                              Similarity Trap
+                            </span>
+                          )}
+                        </div>
+                        <span className="font-mono text-[10px] text-slate-400">
+                          CE {cand.cross_encoder_score.toFixed(2)} · Sem{" "}
+                          {cand.semantic_score.toFixed(2)} · BM25{" "}
+                          {cand.bm25_score.toFixed(2)}
+                        </span>
+                      </div>
+                      <p className="italic leading-relaxed text-slate-200">
+                        “{cand.text}”
+                      </p>
+                      {cand.stance_rationale && (
+                        <p className="mt-1 text-[11px] text-slate-400">
+                          {cand.stance_rationale}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Expanded Panel: Gap 2 (Atomic Claim Decomposition) */}
+          {openGapTab === "gap2" && g2 && (
+            <div className="mt-3 space-y-3 rounded-xl border border-violet-400/25 bg-black/35 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-violet-200">
+                  Atomic Claim Decomposition ({g2.propositions.length}{" "}
+                  {g2.propositions.length === 1
+                    ? "Proposition"
+                    : "Propositions"}
+                  )
+                </p>
+                <span className="font-mono text-[11px] text-slate-400">
+                  Method: {g2.decomposition_method}
+                </span>
+              </div>
+
+              {g2.summary_explanation && (
+                <p className="text-xs leading-relaxed text-slate-300">
+                  {g2.summary_explanation}
+                </p>
+              )}
+
+              <div className="space-y-2">
+                {g2.propositions.map((prop) => {
+                  const pMeta =
+                    STATUS_CONFIG[prop.verdict] ?? STATUS_CONFIG.UNSUPPORTED;
+                  return (
+                    <div
+                      key={`${item.claim_id}-prop-${prop.proposition_id}`}
+                      className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 text-xs"
+                    >
+                      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                        <span className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[10px] text-slate-300">
+                          {prop.proposition_id}
+                        </span>
+                        <span
+                          className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${pMeta.badgeClass}`}
+                        >
+                          {pMeta.label}
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          Confidence: {prop.confidence}
+                        </span>
+                      </div>
+                      <p className="font-medium leading-relaxed text-white">
+                        {prop.proposition_text}
+                      </p>
+                      {prop.explanation && (
+                        <p className="mt-1 text-[11px] text-slate-400">
+                          {prop.explanation}
+                        </p>
+                      )}
+                      {prop.preserved_qualifiers.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {prop.preserved_qualifiers.map((q, qIdx) => (
+                            <span
+                              key={`${prop.proposition_id}-q-${qIdx}`}
+                              className="rounded border border-violet-400/25 bg-violet-500/10 px-1.5 py-0.5 font-mono text-[10px] text-violet-200"
+                            >
+                              {q}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Expanded Panel: Gap 3 (Time-Aware Consensus Tracking) */}
+          {openGapTab === "gap3" && g3 && temporalMeta && (
+            <div className="mt-3 space-y-3 rounded-xl border border-amber-400/25 bg-black/35 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-amber-200">
+                  Time-Aware Citation & Consensus Tracking (Preserves Historical
+                  Verdict)
+                </p>
+                <span
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${temporalMeta.badgeClass}`}
+                >
+                  {temporalMeta.label}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
+                  <span className="block text-[10px] uppercase text-slate-400">
+                    Stage & Year
+                  </span>
+                  <span className="text-xs font-semibold text-white">
+                    {g3.cited_publication_year ?? "N/A"} ·{" "}
+                    {formatStageLabel(g3.publication_stage)}
+                  </span>
+                </div>
+                <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
+                  <span className="block text-[10px] uppercase text-slate-400">
+                    Total Citations
+                  </span>
+                  <span className="font-mono text-sm font-semibold text-white">
+                    {g3.subsequent_citation_count.toLocaleString()}
+                  </span>
+                </div>
+                <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
+                  <span className="block text-[10px] uppercase text-slate-400">
+                    Confirming / Challenging
+                  </span>
+                  <span className="font-mono text-sm font-semibold text-white">
+                    <span className="text-emerald-300">
+                      +{g3.confirming_studies_count}
+                    </span>{" "}
+                    /{" "}
+                    <span className="text-rose-300">
+                      -{g3.challenging_studies_count}
+                    </span>
+                  </span>
+                </div>
+                <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
+                  <span className="block text-[10px] uppercase text-slate-400">
+                    Systematic Reviews
+                  </span>
+                  <span className="font-mono text-sm font-semibold text-cyan-200">
+                    {g3.systematic_reviews_count}
+                  </span>
+                </div>
+              </div>
+
+              {g3.temporal_summary && (
+                <p className="text-xs leading-relaxed text-slate-300">
+                  {g3.temporal_summary}
+                </p>
+              )}
+
+              {g3.temporal_flags.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {g3.temporal_flags.map((flag, idx) => (
+                    <span
+                      key={`${item.claim_id}-tflag-${idx}`}
+                      className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] text-amber-200"
+                    >
+                      {flag}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {g3.chronological_timeline.length > 0 && (
+                <div>
+                  <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                    Chronological Citation Timeline
+                  </span>
+                  <ul className="space-y-1.5 border-l border-amber-400/30 pl-3 text-xs text-slate-300">
+                    {g3.chronological_timeline.map((entry, idx) => (
+                      <li
+                        key={`${item.claim_id}-tl-${idx}`}
+                        className="leading-relaxed"
+                      >
+                        {entry}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Expanded Panel: Gap 4 (Uncertainty Calibration & Abstention) */}
+          {openGapTab === "gap4" && g4 && actionMeta && (
+            <div className="mt-3 space-y-3 rounded-xl border border-emerald-400/25 bg-black/35 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-emerald-200">
+                  Uncertainty-Aware Calibration & Abstention Policy
+                </p>
+                <span
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${actionMeta.badgeClass}`}
+                >
+                  Policy: {actionMeta.label}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <MetricBar
+                  label="Calibrated Probability"
+                  value={g4.calibrated_probability}
+                  colorClass="bg-gradient-to-r from-violet-400 to-cyan-400"
+                />
+                <MetricBar
+                  label="Evidence Coverage"
+                  value={g4.evidence_coverage_score}
+                  colorClass="bg-emerald-400"
+                />
+                <MetricBar
+                  label="Retrieval Confidence"
+                  value={g4.retrieval_confidence}
+                  colorClass="bg-cyan-400"
+                />
+                <MetricBar
+                  label="Passage Agreement"
+                  value={g4.passage_agreement_score}
+                  colorClass={
+                    g4.has_conflicting_passages
+                      ? "bg-rose-400"
+                      : "bg-indigo-400"
+                  }
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 py-2 text-xs">
+                <span className="text-slate-300">{g4.user_message}</span>
+                <span className="font-mono text-[11px] font-semibold text-emerald-300">
+                  Composite: {formatPercent(g4.composite_reliability_score)}
+                </span>
+              </div>
+
+              {g4.uncertainty_flags.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {g4.uncertainty_flags.map((flag, idx) => (
+                    <span
+                      key={`${item.claim_id}-uflag-${idx}`}
+                      className="rounded-md border border-fuchsia-500/30 bg-fuchsia-500/10 px-2 py-0.5 font-mono text-[10px] text-fuchsia-200"
+                    >
+                      {flag}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </article>
   );
 };
@@ -1175,15 +2083,12 @@ const ClaimVerificationCard: React.FC<{ item: ClaimVerificationResult }> = ({
 // ============================================================================
 
 export default function App() {
-  // Authentication session state
   const [session, setSession] = useState<AuthSession | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(isSupabaseConfigured);
 
-  // Navigation & mobile sidebar drawer
   const [activeView, setActiveView] = useState<NavView>("verify");
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
 
-  // Live API configuration & diagnostics
   const [apiBaseUrl, setApiBaseUrl] = useState<string>(resolveEnvApiUrl);
   const [apiUrlInput, setApiUrlInput] = useState<string>(resolveEnvApiUrl);
   const [settingsSavedNotice, setSettingsSavedNotice] =
@@ -1197,7 +2102,6 @@ export default function App() {
     errorMessage: null,
   });
 
-  // View 1: Verify Paper input state
   const [inputMode, setInputMode] = useState<InputMode>("pdf");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
@@ -1205,7 +2109,6 @@ export default function App() {
   const [rawText, setRawText] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Verification & Export execution state
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [activePipelineStep, setActivePipelineStep] = useState<number>(0);
   const [showColdStartNotice, setShowColdStartNotice] =
@@ -1216,7 +2119,6 @@ export default function App() {
   >(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
-  // View 2: Active report & exploration filters
   const [activeReport, setActiveReport] = useState<VerificationReport | null>(
     null,
   );
@@ -1224,7 +2126,6 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [onlyHumanReview, setOnlyHumanReview] = useState<boolean>(false);
 
-  // View 3: Cloud & Local Session History
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryEntry[]>(
     () => (isSupabaseConfigured ? [] : loadLocalSessionHistory()),
   );
@@ -1389,7 +2290,6 @@ export default function App() {
     runHealthCheck(apiBaseUrl);
   }, [apiBaseUrl, runHealthCheck]);
 
-  // Multi-step progress ticker + Render cold-start notice while verifying
   useEffect(() => {
     if (!isVerifying) {
       setActivePipelineStep(0);
@@ -1413,7 +2313,6 @@ export default function App() {
     };
   }, [isVerifying]);
 
-  // Derived text metrics
   const textMetrics = useMemo(() => {
     const trimmed = rawText.trim();
     return {
@@ -1422,10 +2321,42 @@ export default function App() {
     };
   }, [rawText]);
 
-  // Derived report counts & filtered results
   const reportCounts = useMemo(() => {
     if (!activeReport) return null;
     return computeStatusCounts(activeReport);
+  }, [activeReport]);
+
+  // Document-level Gaps 1-4 diagnostics roll-up
+  const gapSummary = useMemo(() => {
+    if (!activeReport) return null;
+    let hasDiagnostics = false;
+    let similarityTraps = 0;
+    let compoundClaims = 0;
+    let temporalAlerts = 0;
+    let abstainedClaims = 0;
+
+    for (const r of activeReport.results) {
+      if (
+        r.evidence_ranking ||
+        r.claim_decomposition ||
+        r.temporal_assessment ||
+        r.uncertainty_calibration
+      ) {
+        hasDiagnostics = true;
+      }
+      if (r.evidence_ranking?.similarity_trap_detected) similarityTraps += 1;
+      if (r.claim_decomposition?.is_compound) compoundClaims += 1;
+      if (r.temporal_assessment?.needs_temporal_review) temporalAlerts += 1;
+      if (r.uncertainty_calibration?.abstained) abstainedClaims += 1;
+    }
+
+    if (!hasDiagnostics) return null;
+    return {
+      similarityTraps,
+      compoundClaims,
+      temporalAlerts,
+      abstainedClaims,
+    };
   }, [activeReport]);
 
   const filteredClaims = useMemo(() => {
@@ -1445,6 +2376,11 @@ export default function App() {
           item.explanation,
           item.uncertainty_note,
           ...item.mismatch_flags,
+          item.temporal_assessment?.temporal_status ?? "",
+          item.uncertainty_calibration?.action ?? "",
+          ...(item.claim_decomposition?.propositions.map(
+            (p) => p.proposition_text,
+          ) ?? []),
         ]
           .join(" ")
           .toLowerCase();
@@ -1561,7 +2497,6 @@ export default function App() {
       const tempId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const nowIso = new Date().toISOString();
 
-      // Persist directly to Supabase Cloud History if authenticated
       if (supabase && isSupabaseConfigured && session?.userId) {
         const { data: inserted, error: insertError } = await supabase
           .from("verification_reports")
@@ -1791,9 +2726,6 @@ export default function App() {
     setSessionHistory(isSupabaseConfigured ? [] : loadLocalSessionHistory());
   };
 
-  // --------------------------------------------------------------------------
-  // Gate 1: Brief Session Bootstrap Screen While Checking Supabase Auth
-  // --------------------------------------------------------------------------
   if (authLoading) {
     return (
       <div className="flex min-h-screen w-full flex-col items-center justify-center bg-[#070711] px-4 text-slate-100">
@@ -1806,9 +2738,6 @@ export default function App() {
     );
   }
 
-  // --------------------------------------------------------------------------
-  // Gate 2: Render Aurora Violet Login Screen if not signed in
-  // --------------------------------------------------------------------------
   if (!session) {
     return (
       <AuroraLoginScreen
@@ -1822,9 +2751,6 @@ export default function App() {
     );
   }
 
-  // --------------------------------------------------------------------------
-  // Post-Login Navigation Config
-  // --------------------------------------------------------------------------
   const isCloudMode = Boolean(
     session.isCloudAuth && session.userId && isSupabaseConfigured,
   );
@@ -1860,7 +2786,7 @@ export default function App() {
     report: {
       title: "Verification Report",
       subtitle:
-        "Claim-by-claim verdict inspection, source passages, and human-review flags",
+        "Claim-by-claim verdicts, hybrid NLI ranking, atomic split, temporal consensus & calibration",
     },
     history: {
       title: isCloudMode ? "Cloud Verification History" : "Session History",
@@ -1879,11 +2805,9 @@ export default function App() {
     .charAt(0)
     .toUpperCase();
 
-  // Reusable Sidebar Content (Desktop & Mobile Drawer)
   const renderSidebarContent = () => (
     <div className="flex h-full flex-col justify-between">
       <div>
-        {/* Brand Header */}
         <div className="flex items-center justify-between px-5 pt-6 pb-5">
           <div className="flex items-center gap-3">
             <BrandBadge size="md" />
@@ -1906,7 +2830,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* Quick Action CTA */}
         <div className="px-4 pb-4">
           <button
             type="button"
@@ -1922,7 +2845,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* Primary Navigation Links */}
         <nav aria-label="Workspace navigation" className="space-y-1 px-3">
           {navItems.map((item) => {
             const Icon = item.icon;
@@ -1979,7 +2901,6 @@ export default function App() {
         </nav>
       </div>
 
-      {/* Signed-In Profile Card */}
       <div className="border-t border-white/[0.08] p-4">
         <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-3">
           <div className="flex items-center gap-3">
@@ -2014,12 +2935,8 @@ export default function App() {
     </div>
   );
 
-  // --------------------------------------------------------------------------
-  // Main Post-Login SaaS Shell
-  // --------------------------------------------------------------------------
   return (
     <div className="relative flex min-h-screen w-full bg-[#070711] text-slate-100 selection:bg-violet-500/30 selection:text-violet-100">
-      {/* Subtle Ambient Aurora Backdrop */}
       <div
         aria-hidden="true"
         className="pointer-events-none fixed inset-0 overflow-hidden"
@@ -2028,12 +2945,10 @@ export default function App() {
         <div className="absolute bottom-0 right-0 h-[380px] w-[480px] rounded-full bg-[radial-gradient(circle,_rgba(34,211,238,0.09)_0%,_rgba(168,85,247,0.06)_45%,_transparent_72%)] blur-3xl" />
       </div>
 
-      {/* Desktop Left Sidebar */}
       <aside className="sticky top-0 z-20 hidden h-screen w-64 shrink-0 border-r border-white/[0.08] bg-[#0a0918]/85 backdrop-blur-2xl lg:block">
         {renderSidebarContent()}
       </aside>
 
-      {/* Mobile Slide-Over Sidebar */}
       {mobileMenuOpen && (
         <div className="fixed inset-0 z-50 flex lg:hidden">
           <div
@@ -2046,9 +2961,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Right Main Column */}
       <div className="relative z-10 flex min-w-0 flex-1 flex-col">
-        {/* Sticky Top Header Bar */}
         <header className="sticky top-0 z-20 flex items-center justify-between gap-4 border-b border-white/[0.08] bg-[#070711]/80 px-4 py-3.5 backdrop-blur-xl sm:px-8">
           <div className="flex min-w-0 items-center gap-3">
             <button
@@ -2070,7 +2983,6 @@ export default function App() {
           </div>
 
           <div className="flex shrink-0 items-center gap-2.5">
-            {/* Live API Health Indicator Pill */}
             <button
               type="button"
               onClick={() => runHealthCheck(apiBaseUrl)}
@@ -2117,33 +3029,29 @@ export default function App() {
           </div>
         </header>
 
-        {/* Scrollable Content Viewport */}
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-8 sm:py-8">
           {/* ================================================================ */}
           {/* VIEW 1: VERIFY PAPER WORKBENCH                                   */}
           {/* ================================================================ */}
           {activeView === "verify" && (
             <div className="space-y-6">
-              {/* Primary Verification Card */}
               <section className="relative overflow-hidden rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-5 sm:p-8 shadow-[0_24px_80px_-24px_rgba(0,0,0,0.85)] backdrop-blur-2xl">
                 <div
                   aria-hidden="true"
                   className="pointer-events-none absolute inset-x-12 top-0 h-px bg-gradient-to-r from-transparent via-violet-400/60 to-transparent"
                 />
 
-                {/* Mode Switcher + Title Row */}
                 <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
                   <div>
                     <div className="inline-flex items-center gap-1.5 rounded-full border border-violet-400/25 bg-violet-500/10 px-2.5 py-0.5 text-[11px] font-medium text-violet-200">
                       <Sparkles className="h-3 w-3 text-cyan-300" />
-                      Live Verification Engine
+                      Live Verification Engine · Gaps 1–4 Active
                     </div>
                     <h2 className="mt-2 text-xl font-semibold tracking-tight text-white">
                       Submit a Manuscript for Citation Audit
                     </h2>
                   </div>
 
-                  {/* Segmented Mode Control */}
                   <div className="inline-flex rounded-xl border border-white/10 bg-black/35 p-1">
                     <button
                       type="button"
@@ -2179,7 +3087,6 @@ export default function App() {
                 </div>
 
                 <form onSubmit={handleVerifySubmit} className="space-y-5">
-                  {/* Optional Document Title */}
                   <div>
                     <label
                       htmlFor="doc-title"
@@ -2199,7 +3106,6 @@ export default function App() {
                     />
                   </div>
 
-                  {/* PDF Upload Mode */}
                   {inputMode === "pdf" ? (
                     <div>
                       <input
@@ -2294,7 +3200,6 @@ export default function App() {
                       )}
                     </div>
                   ) : (
-                    /* Paste Text Mode */
                     <div>
                       <div className="mb-1.5 flex items-center justify-between">
                         <label
@@ -2332,7 +3237,6 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Error Banner */}
                   {verifyError && (
                     <div
                       role="alert"
@@ -2355,7 +3259,6 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Live Pipeline Progress Indicator */}
                   {isVerifying && (
                     <div className="rounded-2xl border border-violet-400/25 bg-violet-500/[0.07] p-5">
                       <div className="mb-4 flex items-center justify-between">
@@ -2417,7 +3320,6 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Action Footer */}
                   <div className="flex flex-col-reverse items-stretch justify-between gap-3 border-t border-white/[0.08] pt-5 sm:flex-row sm:items-center">
                     <div className="flex items-center gap-2 text-xs text-slate-400">
                       <Server className="h-3.5 w-3.5 text-violet-400" />
@@ -2447,47 +3349,58 @@ export default function App() {
                 </form>
               </section>
 
-              {/* Architecture Overview Strip (Pure System Info, Zero Mock Data) */}
-              <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              {/* 4-Gap Engine Capability Strip */}
+              <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="rounded-2xl border border-white/[0.08] bg-[#0d0c1d]/65 p-5 backdrop-blur-xl">
-                  <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-violet-400/25 bg-violet-500/12 text-violet-300">
+                  <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-400/25 bg-cyan-500/12 text-cyan-300">
                     <Layers className="h-4 w-4" />
                   </div>
                   <h3 className="text-sm font-semibold text-white">
-                    1. Claim & Marker Parsing
+                    Gap 1 · Hybrid NLI Ranking
                   </h3>
                   <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                    Extracts individual scientific claims, inline markers, and
-                    bibliography strings from uploaded PDFs or pasted manuscript
-                    text.
+                    Combines BM25, semantic RRF, cross-encoder scoring, and NLI
+                    stance checks to catch similarity-trap contradictions.
                   </p>
                 </div>
 
                 <div className="rounded-2xl border border-white/[0.08] bg-[#0d0c1d]/65 p-5 backdrop-blur-xl">
-                  <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-400/25 bg-cyan-500/12 text-cyan-300">
-                    <BookOpen className="h-4 w-4" />
+                  <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-violet-400/25 bg-violet-500/12 text-violet-300">
+                    <GitBranch className="h-4 w-4" />
                   </div>
                   <h3 className="text-sm font-semibold text-white">
-                    2. Source Evidence Retrieval
+                    Gap 2 · Atomic Decomposition
                   </h3>
                   <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                    Resolves cited papers, extracts matching evidence passages,
-                    and detects retractions or metadata mismatches
-                    automatically.
+                    Splits compound claims into standalone propositions and
+                    audits each half independently to expose partial
+                    contradictions.
+                  </p>
+                </div>
+
+                <div className="rounded-2xl border border-white/[0.08] bg-[#0d0c1d]/65 p-5 backdrop-blur-xl">
+                  <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-amber-400/25 bg-amber-500/12 text-amber-300">
+                    <Clock className="h-4 w-4" />
+                  </div>
+                  <h3 className="text-sm font-semibold text-white">
+                    Gap 3 · Temporal Consensus
+                  </h3>
+                  <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
+                    Tracks retractions, corrections, preprints, and newer citing
+                    reviews without overwriting historical alignment.
                   </p>
                 </div>
 
                 <div className="rounded-2xl border border-white/[0.08] bg-[#0d0c1d]/65 p-5 backdrop-blur-xl">
                   <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-400/25 bg-emerald-500/12 text-emerald-300">
-                    <ShieldCheck className="h-4 w-4" />
+                    <Gauge className="h-4 w-4" />
                   </div>
                   <h3 className="text-sm font-semibold text-white">
-                    3. 5-Tier Verdict & Review
+                    Gap 4 · Uncertainty & Abstention
                   </h3>
                   <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                    Scores every claim across Supported, Partially Supported,
-                    Unsupported, Contradictory, or Potentially Outdated with
-                    confidence & human-review flags.
+                    Calibrates probability, evidence coverage, and agreement to
+                    abstain or flag for review when evidence is weak.
                   </p>
                 </div>
               </section>
@@ -2523,7 +3436,6 @@ export default function App() {
                 </div>
               ) : (
                 <>
-                  {/* Report Top Summary Banner */}
                   <section className="rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-5 sm:p-7 backdrop-blur-2xl">
                     <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
                       <div>
@@ -2595,7 +3507,6 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Dynamic 5-Verdict Summary Cards */}
                     {reportCounts && (
                       <>
                         <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
@@ -2637,7 +3548,6 @@ export default function App() {
                           })}
                         </div>
 
-                        {/* Proportional Verdict Distribution Bar */}
                         {activeReport.total_claims > 0 && (
                           <div className="mt-5">
                             <div className="flex h-2 w-full overflow-hidden rounded-full bg-white/[0.06]">
@@ -2660,9 +3570,46 @@ export default function App() {
                         )}
                       </>
                     )}
+
+                    {/* Document-Level Gaps 1-4 Signal Roll-Up */}
+                    {gapSummary && (
+                      <div className="mt-5 grid grid-cols-2 gap-2.5 border-t border-white/[0.08] pt-4 sm:grid-cols-4">
+                        <div className="rounded-xl border border-cyan-400/20 bg-cyan-500/[0.05] px-3 py-2">
+                          <span className="block text-[10px] font-semibold uppercase tracking-wider text-cyan-300">
+                            Gap 1 · Similarity Traps
+                          </span>
+                          <span className="mt-0.5 block font-mono text-base font-bold text-white">
+                            {gapSummary.similarityTraps}
+                          </span>
+                        </div>
+                        <div className="rounded-xl border border-violet-400/20 bg-violet-500/[0.05] px-3 py-2">
+                          <span className="block text-[10px] font-semibold uppercase tracking-wider text-violet-300">
+                            Gap 2 · Compound Claims
+                          </span>
+                          <span className="mt-0.5 block font-mono text-base font-bold text-white">
+                            {gapSummary.compoundClaims}
+                          </span>
+                        </div>
+                        <div className="rounded-xl border border-amber-400/20 bg-amber-500/[0.05] px-3 py-2">
+                          <span className="block text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+                            Gap 3 · Temporal Alerts
+                          </span>
+                          <span className="mt-0.5 block font-mono text-base font-bold text-white">
+                            {gapSummary.temporalAlerts}
+                          </span>
+                        </div>
+                        <div className="rounded-xl border border-fuchsia-400/20 bg-fuchsia-500/[0.05] px-3 py-2">
+                          <span className="block text-[10px] font-semibold uppercase tracking-wider text-fuchsia-300">
+                            Gap 4 · Abstentions
+                          </span>
+                          <span className="mt-0.5 block font-mono text-base font-bold text-white">
+                            {gapSummary.abstainedClaims}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </section>
 
-                  {/* Limitations Callout (Only if returned by backend) */}
                   {activeReport.limitations.length > 0 && (
                     <section className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.07] p-4 sm:p-5">
                       <div className="flex items-start gap-3">
@@ -2681,7 +3628,6 @@ export default function App() {
                     </section>
                   )}
 
-                  {/* Search & Filter Toolbar */}
                   <section className="flex flex-col gap-3 rounded-2xl border border-white/[0.08] bg-[#0d0c1d]/75 p-4 backdrop-blur-xl md:flex-row md:items-center md:justify-between">
                     <div className="relative flex-1">
                       <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
@@ -2689,7 +3635,7 @@ export default function App() {
                         type="text"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Search claims, citations, passages, or mismatch flags..."
+                        placeholder="Search claims, citations, passages, temporal status, or flags..."
                         className="w-full rounded-xl border border-white/10 bg-white/[0.03] py-2 pl-10 pr-4 text-sm text-white placeholder:text-slate-500 focus:border-violet-400/65 focus:outline-none focus:ring-4 focus:ring-violet-500/15"
                       />
                     </div>
@@ -2727,7 +3673,6 @@ export default function App() {
                     </div>
                   </section>
 
-                  {/* Claim Cards Feed */}
                   {filteredClaims.length === 0 ? (
                     <div className="rounded-2xl border border-white/[0.08] bg-[#0d0c1d]/70 px-6 py-12 text-center">
                       <p className="text-sm font-medium text-slate-300">
@@ -2949,7 +3894,6 @@ export default function App() {
           {/* ================================================================ */}
           {activeView === "settings" && (
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              {/* Endpoint Configuration Card */}
               <section className="rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-6 backdrop-blur-2xl">
                 <div className="mb-5 flex items-center gap-3">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-violet-400/30 bg-violet-500/12 text-violet-300">
@@ -3020,7 +3964,6 @@ export default function App() {
                 </form>
               </section>
 
-              {/* Live Health Diagnostics Card */}
               <section className="rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-6 backdrop-blur-2xl">
                 <div className="mb-5 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
@@ -3089,7 +4032,6 @@ export default function App() {
                 </div>
               </section>
 
-              {/* Supabase Auth & Cloud Database Status Card */}
               <section className="rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-6 backdrop-blur-2xl lg:col-span-2">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
@@ -3146,7 +4088,6 @@ export default function App() {
                 </dl>
               </section>
 
-              {/* Backend Schema Contract Card */}
               <section className="rounded-3xl border border-white/10 bg-[#0d0c1d]/80 p-6 backdrop-blur-2xl lg:col-span-2">
                 <div className="mb-4 flex items-center gap-3">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-400/25 bg-emerald-500/12 text-emerald-300">
@@ -3158,7 +4099,7 @@ export default function App() {
                     </h2>
                     <p className="text-xs text-slate-400">
                       Frontend types mirror VerificationReport and
-                      ClaimVerificationResult strictly
+                      ClaimVerificationResult including Gaps 1–4
                     </p>
                   </div>
                 </div>
@@ -3169,7 +4110,7 @@ export default function App() {
   "document_title": string,
   "total_claims": number,
   "summary_counts": Record<ClaimStatus, number>,
-  "results": ClaimVerificationResult[],
+  "results": ClaimVerificationResult[] // + evidence_ranking, claim_decomposition, temporal_assessment, uncertainty_calibration
   "limitations": string[]
 }`}
                 </pre>
