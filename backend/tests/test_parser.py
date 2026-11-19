@@ -125,6 +125,119 @@ class TestDocumentParser(unittest.TestCase):
             self.assertIsNotNone(claim.raw_reference)
             self.assertIn(ref_author, claim.raw_reference)
 
+    # Inputs: Synthetic 2-column IEEE/arXiv PDF with full-width title, cross-column claim, and Column 2 references.
+    # Outputs: Verifies reading order reads left column completely before right column without interleaving.
+    def test_two_column_ieee_arxiv_pdf_layout(self):
+        doc = pymupdf.open()
+        page = doc.new_page(width=612, height=792)
+
+        # Full-width IEEE title banner
+        page.insert_textbox(
+            pymupdf.Rect(50, 40, 562, 95),
+            "Sparse Attention Architectures for Clinical Time-Series Forecasting",
+            fontsize=14,
+            fontname="hebo",
+        )
+
+        # Left column (x=50..290): Section I + Claim 1 + first half of Claim 2 wrapping to right column
+        page.insert_textbox(
+            pymupdf.Rect(50, 120, 290, 145),
+            "I. INTRODUCTION",
+            fontsize=11,
+            fontname="hebo",
+        )
+        page.insert_textbox(
+            pymupdf.Rect(50, 150, 290, 270),
+            "Transformer architectures achieve 28.4 BLEU on the WMT 2014 English-to-German translation benchmark [1].",
+            fontsize=10,
+        )
+        page.insert_textbox(
+            pymupdf.Rect(50, 290, 290, 380),
+            "In multi-hospital ICU telemetry benchmarks, sparse clinical encoders reduced inference latency by 41.2%",
+            fontsize=10,
+        )
+
+        # Right column (x=320..562): Continuation of Claim 2 + Claim 3 + References
+        page.insert_textbox(
+            pymupdf.Rect(320, 120, 562, 195),
+            "while maintaining equivalent mortality prediction accuracy across five cohorts [2].",
+            fontsize=10,
+        )
+        page.insert_textbox(
+            pymupdf.Rect(320, 210, 562, 235),
+            "II. RESULTS",
+            fontsize=11,
+            fontname="hebo",
+        )
+        page.insert_textbox(
+            pymupdf.Rect(320, 240, 562, 330),
+            "Ablation trials confirmed that quantized weights lowered GPU memory consumption by 52% [3].",
+            fontsize=10,
+        )
+        page.insert_textbox(
+            pymupdf.Rect(320, 355, 562, 380),
+            "REFERENCES",
+            fontsize=11,
+            fontname="hebo",
+        )
+        page.insert_textbox(
+            pymupdf.Rect(320, 385, 562, 580),
+            (
+                "[1] Vaswani, A., et al. (2017). Attention Is All You Need. NeurIPS.\n"
+                "[2] Chen, L., & Park, H. (2023). Sparse Clinical Encoders. IEEE JBHI.\n"
+                "[3] Gomez, R. (2024). Quantized Clinical Transformers. arXiv:2401.01234."
+            ),
+            fontsize=9.5,
+        )
+
+        pdf_bytes = doc.tobytes()
+        doc.close()
+
+        claims = extract_claims_from_pdf(pdf_bytes)
+
+        self.assertEqual(len(claims), 3)
+        self.assertEqual([c.inline_marker for c in claims], ["[1]", "[2]", "[3]"])
+        self.assertIn("28.4 BLEU", claims[0].claim_text)
+        self.assertIn("Vaswani", claims[0].raw_reference)
+        # Claim 2 must seamlessly rejoin across the column break
+        self.assertIn("41.2%", claims[1].claim_text)
+        self.assertIn("five cohorts [2].", claims[1].claim_text)
+        self.assertIn("Chen, L.", claims[1].raw_reference)
+        self.assertIn("52%", claims[2].claim_text)
+        self.assertIn("Gomez", claims[2].raw_reference)
+
+    # Inputs: Messy copy-pasted text with ligatures, soft hyphens, broken wraps, page numbers, and split [1] refs.
+    # Outputs: Verifies normalization and claim-reference mapping recover cleanly from broken pasted input.
+    def test_broken_copy_pasted_text_edge_cases(self):
+        messy_text = (
+            "   Clinical\u00a0AI   Audit\r\n\r\n"
+            "1. Introduction\r\n"
+            "Our   \ufb01nal   classi\u00ad\ufb01er   achieved   92.8%   sensi- \r\n"
+            "  tivity   in   prospective   sepsis   screening\u200b [1].\r\n"
+            "Page 2 of 9\r\n"
+            "External   validation   showed   a   31.5%   reduc-\r\n"
+            "tion   in   false   alarms   across   urban   clinics [2].\r\n"
+            "  - 3 -  \r\n\r\n"
+            "References\r\n"
+            "[1]\r\n"
+            "Nair, P., & Lin, S. (2023). Prospective Sepsis Classi\ufb01ers. Lancet Digital Health.\r\n"
+            "[2]   Okafor, D. (2024). Alarm Fatigue\r\n"
+            "Reduction in Emergency Medicine. BMJ Open.\r\n"
+        )
+
+        claims = extract_claims_from_text(messy_text)
+
+        self.assertEqual(len(claims), 2)
+        self.assertIn("final classifier achieved 92.8% sensitivity", claims[0].claim_text)
+        self.assertNotIn("Page 2 of 9", claims[0].claim_text)
+        self.assertEqual(claims[0].inline_marker, "[1]")
+        self.assertIn("Nair, P.", claims[0].raw_reference)
+        self.assertIn("Classifiers", claims[0].raw_reference)
+
+        self.assertIn("31.5% reduction in false alarms", claims[1].claim_text)
+        self.assertEqual(claims[1].inline_marker, "[2]")
+        self.assertIn("Okafor, D.", claims[1].raw_reference)
+
 
 if __name__ == "__main__":
     unittest.main()

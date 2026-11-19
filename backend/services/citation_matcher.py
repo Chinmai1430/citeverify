@@ -75,8 +75,7 @@ def parse_reference_list(references_text: str) -> dict[str, str]:
         return {}
 
     lines = [line.strip() for line in references_text.splitlines() if line.strip()]
-    numbered_start = re.compile(r"^(?:\[(\d+)\]|(\d+)[\.\)])\s+(.+)$")
-
+    numbered_start = re.compile(r"^(?:\[(\d+)\]|(\d+)[\.\)])(?:\s+(.*))?$")
     entries: list[tuple[str | None, str]] = []
     has_numbered_refs = any(numbered_start.match(line) for line in lines)
 
