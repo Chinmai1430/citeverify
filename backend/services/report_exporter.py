@@ -6,9 +6,9 @@ import pymupdf
 
 # Support running from repo root (backend.schemas) or inside backend/ (schemas)
 try:
-    from backend.schemas import ClaimStatus, VerificationReport
+    from backend.schemas import ClaimStatus, ClaimVerificationResult, VerificationReport
 except ImportError:
-    from schemas import ClaimStatus, VerificationReport
+    from schemas import ClaimStatus, ClaimVerificationResult, VerificationReport
 
 
 _STATUS_ORDER = (
@@ -35,6 +35,22 @@ _STATUS_COLORS: dict[str, tuple[float, float, float]] = {
     ClaimStatus.POTENTIALLY_OUTDATED.value: (0.55, 0.16, 0.52),
 }
 
+_TEMPORAL_STATUS_LABELS: dict[str, str] = {
+    "CONSENSUS_ALIGNED": "Consensus Aligned",
+    "SUPERSEDED_OR_CHALLENGED": "Superseded / Challenged",
+    "RETRACTED": "Retracted",
+    "CORRECTED_OR_UPDATED": "Corrected / Updated",
+    "STALE_NEEDS_UPDATE": "Aging / Check Updates",
+    "INSUFFICIENT_TEMPORAL_DATA": "Limited Temporal Data",
+}
+
+_CALIBRATION_ACTION_LABELS: dict[str, str] = {
+    "PRESENT_VERDICT": "Auto-Verified",
+    "FLAG_FOR_REVIEW": "Flag for Review",
+    "ABSTAIN": "Abstained",
+    "MARK_UNVERIFIABLE": "Unverifiable",
+}
+
 _PDF_CHAR_REPLACEMENTS = str.maketrans(
     {
         "\u2014": "--",
@@ -46,6 +62,7 @@ _PDF_CHAR_REPLACEMENTS = str.maketrans(
         "\u2022": "-",
         "\u2026": "...",
         "\u00a0": " ",
+        "\u2192": "->",
     }
 )
 
@@ -55,6 +72,19 @@ _PDF_CHAR_REPLACEMENTS = str.maketrans(
 def _sanitize_pdf_text(text: str) -> str:
     normalized = text.translate(_PDF_CHAR_REPLACEMENTS)
     return normalized.encode("latin-1", errors="replace").decode("latin-1")
+
+
+# Inputs: Float value in [0.0, 1.0].
+# Outputs: Whole-percent formatted string (e.g., "88%").
+def _fmt_pct(value: float) -> str:
+    clamped = min(1.0, max(0.0, float(value)))
+    return f"{round(clamped * 100)}%"
+
+
+# Inputs: Enum-style snake_case string (e.g., "PEER_REVIEWED_JOURNAL").
+# Outputs: Human-readable title-cased label (e.g., "Peer Reviewed Journal").
+def _fmt_stage(stage: str) -> str:
+    return " ".join(part.capitalize() for part in (stage or "UNKNOWN").split("_"))
 
 
 # Inputs: VerificationReport instance.
@@ -71,6 +101,56 @@ def _normalized_summary_counts(report: VerificationReport) -> dict[str, int]:
     return counts
 
 
+# Inputs: VerificationReport instance.
+# Outputs: Dict of document-level Gap 1-4 roll-up counts, or None if no claim has Gap 1-4 data.
+def _compute_gap_rollup(report: VerificationReport) -> dict[str, int] | None:
+    has_any = False
+    similarity_traps = 0
+    compound_claims = 0
+    temporal_alerts = 0
+    abstentions = 0
+
+    for item in report.results:
+        if (
+            item.evidence_ranking
+            or item.claim_decomposition
+            or item.temporal_assessment
+            or item.uncertainty_calibration
+        ):
+            has_any = True
+        if item.evidence_ranking and item.evidence_ranking.similarity_trap_detected:
+            similarity_traps += 1
+        if item.claim_decomposition and item.claim_decomposition.is_compound:
+            compound_claims += 1
+        if item.temporal_assessment and item.temporal_assessment.needs_temporal_review:
+            temporal_alerts += 1
+        if item.uncertainty_calibration and item.uncertainty_calibration.abstained:
+            abstentions += 1
+
+    if not has_any:
+        return None
+
+    return {
+        "similarity_traps": similarity_traps,
+        "compound_claims": compound_claims,
+        "temporal_alerts": temporal_alerts,
+        "abstentions": abstentions,
+    }
+
+
+# Inputs: ClaimVerificationResult instance.
+# Outputs: True if any Gap 1-4 diagnostic object is populated on this claim.
+def _has_gap_diagnostics(item: ClaimVerificationResult) -> bool:
+    return any(
+        (
+            item.evidence_ranking,
+            item.claim_decomposition,
+            item.temporal_assessment,
+            item.uncertainty_calibration,
+        )
+    )
+
+
 # Inputs: Document title and desired file extension (e.g., "md" or "pdf").
 # Outputs: Safe lowercase filename string for HTTP Content-Disposition download headers.
 def build_export_filename(document_title: str, extension: str) -> str:
@@ -81,7 +161,7 @@ def build_export_filename(document_title: str, extension: str) -> str:
 
 
 # Inputs: VerificationReport schema object and optional UTC timestamp override.
-# Outputs: Complete, well-structured Markdown audit report string.
+# Outputs: Complete, well-structured Markdown audit report string including Gaps 1-4 diagnostics.
 def export_report_to_markdown(
     report: VerificationReport,
     generated_at: datetime | None = None,
@@ -90,6 +170,7 @@ def export_report_to_markdown(
     counts = _normalized_summary_counts(report)
     total = report.total_claims or len(report.results)
     review_needed = sum(1 for item in report.results if item.needs_human_review)
+    gap_rollup = _compute_gap_rollup(report)
 
     lines: list[str] = [
         "# CiteVerify Citation & Claim Audit Report",
@@ -112,6 +193,21 @@ def export_report_to_markdown(
         share = f"{(count / total * 100):.1f}%" if total > 0 else "0.0%"
         label = _STATUS_LABELS[status.value]
         lines.append(f"| **{label}** (`{status.value}`) | {count} | {share} |")
+
+    if gap_rollup is not None:
+        lines.extend(
+            [
+                "",
+                "### Deep Audit Diagnostics Roll-Up (Gaps 1–4)",
+                "",
+                "| Module | Signal | Count |",
+                "| --- | --- | ---: |",
+                f"| **Gap 1 · Hybrid NLI Ranking** | Similarity Traps Flagged | {gap_rollup['similarity_traps']} |",
+                f"| **Gap 2 · Atomic Decomposition** | Compound Claims Split | {gap_rollup['compound_claims']} |",
+                f"| **Gap 3 · Temporal Consensus** | Temporal Review Alerts | {gap_rollup['temporal_alerts']} |",
+                f"| **Gap 4 · Uncertainty Calibration** | Abstentions / Unverifiable | {gap_rollup['abstentions']} |",
+            ]
+        )
 
     lines.extend(["", "---", "", "## Claim-by-Claim Verification Details", ""])
 
@@ -147,8 +243,77 @@ def export_report_to_markdown(
                 lines.append("")
                 for passage_line in item.evidence_passage.strip().splitlines():
                     lines.append(f"  > {passage_line.strip()}")
+                lines.append("")
 
-            lines.append("")
+            # Deep Audit Diagnostics (Gaps 1-4)
+            if _has_gap_diagnostics(item):
+                lines.append("#### Deep Audit Diagnostics (Gaps 1–4)")
+                lines.append("")
+
+                g1 = item.evidence_ranking
+                if g1:
+                    trap_label = "YES (Similarity Trap Flagged)" if g1.similarity_trap_detected else "No"
+                    lines.append(
+                        f"- **Gap 1 (Hybrid NLI Ranking):** Stance `{g1.top_logical_stance}` | "
+                        f"Cross-Encoder `{g1.top_cross_encoder_score:.2f}` | "
+                        f"BM25 `{g1.top_bm25_score:.2f}` | Semantic `{g1.top_semantic_score:.2f}` | "
+                        f"RRF `{g1.top_rrf_score:.4f}` | Similarity Trap: **{trap_label}** "
+                        f"({len(g1.ranked_candidates)} passage(s) ranked)"
+                    )
+
+                g2 = item.claim_decomposition
+                if g2:
+                    split_label = (
+                        f"Compound ({len(g2.propositions)} propositions)"
+                        if g2.is_compound
+                        else "Atomic (1 proposition)"
+                    )
+                    lines.append(
+                        f"- **Gap 2 (Atomic Decomposition):** {split_label} | "
+                        f"Aggregated Verdict: `{g2.overall_verdict.value}` ({g2.overall_confidence.value})"
+                    )
+                    if g2.is_compound and g2.propositions:
+                        for prop in g2.propositions:
+                            lines.append(
+                                f"  - `[{prop.proposition_id}]` **{prop.verdict.value}** "
+                                f"({prop.confidence.value}): {prop.proposition_text}"
+                            )
+
+                g3 = item.temporal_assessment
+                if g3:
+                    t_label = _TEMPORAL_STATUS_LABELS.get(g3.temporal_status, g3.temporal_status)
+                    year_txt = str(g3.cited_publication_year) if g3.cited_publication_year else "Year N/A"
+                    lines.append(
+                        f"- **Gap 3 (Temporal Consensus):** **{t_label}** (`{g3.temporal_status}`) | "
+                        f"{year_txt} ({_fmt_stage(g3.publication_stage)}) | "
+                        f"Citations: `{g3.subsequent_citation_count:,}` | "
+                        f"Confirming: `+{g3.confirming_studies_count}` / Challenging: `-{g3.challenging_studies_count}` | "
+                        f"Systematic Reviews: `{g3.systematic_reviews_count}`"
+                    )
+                    if g3.temporal_summary:
+                        lines.append(f"  - *Summary:* {g3.temporal_summary}")
+                    if g3.chronological_timeline:
+                        for tl_entry in g3.chronological_timeline[:3]:
+                            lines.append(f"  - *Timeline:* {tl_entry}")
+
+                g4 = item.uncertainty_calibration
+                if g4:
+                    a_label = _CALIBRATION_ACTION_LABELS.get(g4.action, g4.action)
+                    lines.append(
+                        f"- **Gap 4 (Uncertainty Calibration):** Policy **{a_label}** (`{g4.action}`) | "
+                        f"Calibrated Prob `{_fmt_pct(g4.calibrated_probability)}` | "
+                        f"Coverage `{_fmt_pct(g4.evidence_coverage_score)}` | "
+                        f"Retrieval `{_fmt_pct(g4.retrieval_confidence)}` | "
+                        f"Agreement `{_fmt_pct(g4.passage_agreement_score)}` | "
+                        f"Composite `{_fmt_pct(g4.composite_reliability_score)}`"
+                    )
+                    if g4.user_message:
+                        lines.append(f"  - *Policy Note:* {g4.user_message}")
+                    if g4.uncertainty_flags:
+                        u_flags = ", ".join(f"`{f}`" for f in g4.uncertainty_flags)
+                        lines.append(f"  - *Calibration Flags:* {u_flags}")
+
+                lines.append("")
 
     if report.limitations:
         lines.extend(["---", "", "## Verification Scope & Limitations", ""])
@@ -294,7 +459,7 @@ class _PDFReportBuilder:
 
 
 # Inputs: VerificationReport schema object and optional UTC timestamp override.
-# Outputs: Downloadable multi-page PDF audit report as raw bytes.
+# Outputs: Downloadable multi-page PDF audit report as raw bytes including Gaps 1-4 diagnostics.
 def export_report_to_pdf_bytes(
     report: VerificationReport,
     generated_at: datetime | None = None,
@@ -303,6 +468,7 @@ def export_report_to_pdf_bytes(
     counts = _normalized_summary_counts(report)
     total = report.total_claims or len(report.results)
     review_needed = sum(1 for item in report.results if item.needs_human_review)
+    gap_rollup = _compute_gap_rollup(report)
 
     builder = _PDFReportBuilder()
 
@@ -357,6 +523,29 @@ def export_report_to_pdf_bytes(
             gap=3.5,
         )
 
+    if gap_rollup is not None:
+        builder.y += 4.0
+        builder.add_text(
+            "Deep Audit Diagnostics Roll-Up (Gaps 1-4)",
+            fontsize=10.0,
+            fontname="hebo",
+            color=(0.15, 0.22, 0.42),
+            gap=4.0,
+        )
+        builder.add_text(
+            (
+                f"Gap 1 Similarity Traps: {gap_rollup['similarity_traps']}   |   "
+                f"Gap 2 Compound Claims: {gap_rollup['compound_claims']}   |   "
+                f"Gap 3 Temporal Alerts: {gap_rollup['temporal_alerts']}   |   "
+                f"Gap 4 Abstentions: {gap_rollup['abstentions']}"
+            ),
+            fontsize=9.0,
+            fontname="hebo",
+            color=(0.20, 0.25, 0.36),
+            indent=8.0,
+            gap=4.0,
+        )
+
     builder.y += 6.0
     builder.add_divider(gap=12.0)
 
@@ -373,7 +562,7 @@ def export_report_to_pdf_bytes(
         builder.add_text("No verifiable claims were found in this document.", fontsize=9.5)
     else:
         for item in report.results:
-            builder.ensure_space(125.0)
+            builder.ensure_space(130.0)
             verdict_val = item.verdict.value
             verdict_label = _STATUS_LABELS.get(verdict_val, verdict_val)
             verdict_color = _STATUS_COLORS.get(verdict_val, (0.2, 0.2, 0.2))
@@ -441,8 +630,132 @@ def export_report_to_pdf_bytes(
                 fontname="heit",
                 color=(0.35, 0.39, 0.45),
                 indent=8.0,
-                gap=8.0,
+                gap=4.5,
             )
+
+            # Deep Audit Diagnostics (Gaps 1-4)
+            if _has_gap_diagnostics(item):
+                builder.ensure_space(55.0)
+                builder.add_text(
+                    "Deep Audit Diagnostics (Gaps 1-4):",
+                    fontsize=8.8,
+                    fontname="hebo",
+                    color=(0.15, 0.22, 0.42),
+                    indent=8.0,
+                    gap=2.5,
+                )
+
+                g1 = item.evidence_ranking
+                if g1:
+                    trap_txt = "YES - Similarity Trap Flagged" if g1.similarity_trap_detected else "No"
+                    builder.add_text(
+                        (
+                            f"- Gap 1 (Hybrid NLI): Stance {g1.top_logical_stance} | "
+                            f"CE {g1.top_cross_encoder_score:.2f}, BM25 {g1.top_bm25_score:.2f}, "
+                            f"Sem {g1.top_semantic_score:.2f}, RRF {g1.top_rrf_score:.4f} | "
+                            f"Similarity Trap: {trap_txt} ({len(g1.ranked_candidates)} ranked)"
+                        ),
+                        fontsize=8.4,
+                        fontname="helv",
+                        color=(0.74, 0.12, 0.12) if g1.similarity_trap_detected else (0.20, 0.25, 0.32),
+                        indent=14.0,
+                        gap=2.5,
+                    )
+
+                g2 = item.claim_decomposition
+                if g2:
+                    split_txt = (
+                        f"Compound ({len(g2.propositions)} parts)"
+                        if g2.is_compound
+                        else "Atomic (1 part)"
+                    )
+                    builder.add_text(
+                        (
+                            f"- Gap 2 (Atomic Split): {split_txt} | "
+                            f"Aggregated Verdict: {g2.overall_verdict.value} ({g2.overall_confidence.value})"
+                        ),
+                        fontsize=8.4,
+                        fontname="helv",
+                        color=(0.20, 0.25, 0.32),
+                        indent=14.0,
+                        gap=2.5,
+                    )
+                    if g2.is_compound and g2.propositions:
+                        for prop in g2.propositions:
+                            builder.add_text(
+                                f"  [{prop.proposition_id}: {prop.verdict.value}] {prop.proposition_text}",
+                                fontsize=8.2,
+                                fontname="heit",
+                                color=(0.28, 0.32, 0.38),
+                                indent=20.0,
+                                gap=2.0,
+                            )
+
+                g3 = item.temporal_assessment
+                if g3:
+                    t_label = _TEMPORAL_STATUS_LABELS.get(g3.temporal_status, g3.temporal_status)
+                    year_txt = str(g3.cited_publication_year) if g3.cited_publication_year else "Year N/A"
+                    builder.add_text(
+                        (
+                            f"- Gap 3 (Temporal Consensus): {t_label} | {year_txt} ({_fmt_stage(g3.publication_stage)}) | "
+                            f"{g3.subsequent_citation_count:,} cites | "
+                            f"+{g3.confirming_studies_count} confirming / -{g3.challenging_studies_count} challenging | "
+                            f"{g3.systematic_reviews_count} review(s)"
+                        ),
+                        fontsize=8.4,
+                        fontname="helv",
+                        color=(0.66, 0.35, 0.04) if g3.needs_temporal_review else (0.20, 0.25, 0.32),
+                        indent=14.0,
+                        gap=2.5,
+                    )
+                    if g3.temporal_summary:
+                        builder.add_text(
+                            f"  Summary: {g3.temporal_summary}",
+                            fontsize=8.2,
+                            fontname="heit",
+                            color=(0.30, 0.34, 0.40),
+                            indent=20.0,
+                            gap=2.0,
+                        )
+                    for tl_entry in g3.chronological_timeline[:2]:
+                        builder.add_text(
+                            f"  Timeline: {tl_entry}",
+                            fontsize=8.0,
+                            fontname="helv",
+                            color=(0.34, 0.38, 0.44),
+                            indent=20.0,
+                            gap=2.0,
+                        )
+
+                g4 = item.uncertainty_calibration
+                if g4:
+                    a_label = _CALIBRATION_ACTION_LABELS.get(g4.action, g4.action)
+                    builder.add_text(
+                        (
+                            f"- Gap 4 (Uncertainty Calibration): Policy {a_label} | "
+                            f"Calibrated Prob {_fmt_pct(g4.calibrated_probability)}, "
+                            f"Coverage {_fmt_pct(g4.evidence_coverage_score)}, "
+                            f"Retrieval {_fmt_pct(g4.retrieval_confidence)}, "
+                            f"Agreement {_fmt_pct(g4.passage_agreement_score)}, "
+                            f"Composite {_fmt_pct(g4.composite_reliability_score)}"
+                        ),
+                        fontsize=8.4,
+                        fontname="helv",
+                        color=(0.55, 0.16, 0.52) if g4.abstained else (0.20, 0.25, 0.32),
+                        indent=14.0,
+                        gap=2.5,
+                    )
+                    if g4.user_message:
+                        builder.add_text(
+                            f"  Policy Note: {g4.user_message}",
+                            fontsize=8.2,
+                            fontname="heit",
+                            color=(0.30, 0.34, 0.40),
+                            indent=20.0,
+                            gap=2.5,
+                        )
+
+            builder.y += 4.0
             builder.add_divider(color=(0.90, 0.91, 0.94), gap=8.0)
 
     # Limitations section
