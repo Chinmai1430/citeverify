@@ -192,7 +192,7 @@ interface AuthSession {
   userId: string | null;
   email: string;
   displayName: string;
-  provider: "email" | "google";
+  provider: "email" | "google" | "guest";
   isCloudAuth: boolean;
 }
 
@@ -223,11 +223,27 @@ interface SupabaseReportRow {
 }
 
 // ============================================================================
-// 3. Semantic Design Tokens & Constants (Zero Hardcoded Data)
+// 3. Semantic Design Tokens & Constants (Zero Hardcoded Verdicts)
 // ============================================================================
 
 const DEFAULT_API_URL = "https://citeverify-api.onrender.com";
 const HISTORY_STORAGE_KEY = "citeverify_session_history";
+
+const DEMO_SAMPLE_TITLE = "Clinical AI & COVID-19 Citation Integrity Benchmark";
+
+const DEMO_SAMPLE_TEXT = `In an evaluation of retinal fundus photographs from adults with diabetes, a deep learning algorithm achieved 97.5% sensitivity and 93.4% specificity for detecting referable diabetic retinopathy on the EyePACS-1 validation dataset [1].
+
+In hospitalized COVID-19 patients, dexamethasone reduced 28-day mortality among patients receiving invasive mechanical ventilation, while increasing overall 28-day mortality to 62.4% [2].
+
+A multinational hospital registry analysis reported that hydroxychloroquine regimens were associated with decreased in-hospital survival and higher ventricular arrhythmia rates in COVID-19 patients [3].
+
+An autonomous clinical transformer model reduced emergency department misdiagnosis rates by 74.2% across forty European hospitals in a 2024 multi-center audit [4].
+
+References
+[1] Gulshan V, Peng L, Coram M, et al. Development and Validation of a Deep Learning Algorithm for Detection of Diabetic Retinopathy in Retinal Fundus Photographs. JAMA. 2016;316(22):2402-2410. doi:10.1001/jama.2016.17216
+[2] Horby P, Lim WS, Emberson JR, et al. Dexamethasone in Hospitalized Patients with Covid-19. N Engl J Med. 2021;384(8):693-704. doi:10.1056/NEJMoa2021436
+[3] Mehra MR, Desai SS, Ruschitzka F, Patel AN. RETRACTED: Hydroxychloroquine or chloroquine with or without a macrolide for treatment of COVID-19: a multinational registry analysis. The Lancet. 2020. doi:10.1016/S0140-6736(20)31180-6
+[4] Vance K, Sterling R. Autonomous Clinical Transformers for Emergency Triage. European Journal of Clinical AI. 2024;12(4):101-118.`;
 
 const ALL_STATUSES: ClaimStatus[] = [
   "SUPPORTED",
@@ -831,7 +847,7 @@ const GoogleIcon: React.FC<{ className?: string }> = ({
 );
 
 // ============================================================================
-// 6. Aurora Violet Login & Sign-Up Screen (Supabase Auth + Fallback)
+// 6. Aurora Violet Login & Sign-Up Screen (Supabase Auth + Instant Guest Demo)
 // ============================================================================
 
 interface AuroraLoginScreenProps {
@@ -979,11 +995,22 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
       const friendlyMsg = rawMsg
         .toLowerCase()
         .includes("provider is not enabled")
-        ? "Google OAuth is not enabled in Supabase yet. Sign in or create an account with Email & Password above, or enable Google under Supabase Authentication -> Providers."
+        ? "Google OAuth is not enabled in Supabase yet. Sign in or create an account with Email & Password above, or continue as Guest below."
         : rawMsg || "Unable to start Google sign-in right now.";
       setFormNotice({ type: "error", text: friendlyMsg });
       setSubmittingVia(null);
     }
+  };
+
+  const handleGuestDemo = () => {
+    setFormNotice(null);
+    onLoginSuccess({
+      userId: null,
+      email: "guest@citeverify.demo",
+      displayName: "Guest Reviewer",
+      provider: "guest",
+      isCloudAuth: false,
+    });
   };
 
   const healthLabel =
@@ -1199,8 +1226,8 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                         setFormNotice({
                           type: "info",
                           text: isSupabaseConfigured
-                            ? 'New here? Switch to "Create Account" above to register with email and a 6+ character password.'
-                            : "Enter any valid email and 6+ character password to enter the workspace.",
+                            ? 'New here? Switch to "Create Account" above, or click "Continue as Guest" below for instant demo access.'
+                            : "Enter any valid email and 6+ character password, or click Continue as Guest below.",
                         })
                       }
                       className="text-xs font-medium text-violet-300/90 transition-colors hover:text-violet-200"
@@ -1295,6 +1322,20 @@ const AuroraLoginScreen: React.FC<AuroraLoginScreenProps> = ({
                 </>
               )}
             </button>
+
+            {/* Instant Guest Demo Bypass for Evaluators & Reviewers */}
+            <button
+              type="button"
+              onClick={handleGuestDemo}
+              disabled={submittingVia !== null}
+              className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-2.5 text-sm font-medium text-cyan-200 transition-all hover:border-cyan-300/60 hover:bg-cyan-500/20 hover:text-white active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-65"
+            >
+              <Sparkles className="h-4 w-4 text-cyan-300" />
+              <span>Continue as Guest (Instant Demo)</span>
+            </button>
+            <p className="mt-2 text-center text-[11px] text-slate-500">
+              No account needed — test live PDF/text verification immediately
+            </p>
           </div>
         </div>
       </main>
@@ -2152,11 +2193,13 @@ export default function App() {
         if (data.session?.user) {
           setSession(mapSupabaseUser(data.session.user));
         } else {
-          setSession(null);
+          setSession((prev) => (prev && !prev.isCloudAuth ? prev : null));
         }
       })
       .catch(() => {
-        if (isMounted) setSession(null);
+        if (isMounted) {
+          setSession((prev) => (prev && !prev.isCloudAuth ? prev : null));
+        }
       })
       .finally(() => {
         if (isMounted) setAuthLoading(false);
@@ -2169,9 +2212,14 @@ export default function App() {
       if (nextSession?.user) {
         setSession(mapSupabaseUser(nextSession.user));
       } else {
-        setSession(null);
-        setActiveReport(null);
-        setSessionHistory([]);
+        setSession((prev) => {
+          if (prev && !prev.isCloudAuth) {
+            return prev;
+          }
+          setActiveReport(null);
+          setSessionHistory([]);
+          return null;
+        });
       }
       setAuthLoading(false);
     });
@@ -2421,6 +2469,15 @@ export default function App() {
     setIsDragging(false);
     const droppedFile = e.dataTransfer.files?.[0] ?? null;
     handleFilePicked(droppedFile);
+  };
+
+  const handleLoadDemoSample = () => {
+    setVerifyError(null);
+    setExportError(null);
+    setSelectedFile(null);
+    setInputMode("text");
+    setDocumentTitle(DEMO_SAMPLE_TITLE);
+    setRawText(DEMO_SAMPLE_TEXT);
   };
 
   const handleVerifySubmit = async (e?: React.FormEvent) => {
@@ -2745,6 +2802,9 @@ export default function App() {
         onRefreshHealth={() => runHealthCheck(apiBaseUrl)}
         onLoginSuccess={(nextSession) => {
           setSession(nextSession);
+          if (!nextSession.isCloudAuth) {
+            setSessionHistory(loadLocalSessionHistory());
+          }
           setActiveView("verify");
         }}
       />
@@ -2770,7 +2830,7 @@ export default function App() {
     },
     {
       id: "history",
-      label: "Cloud History",
+      label: isCloudMode ? "Cloud History" : "Session History",
       icon: History,
       badge: sessionHistory.length > 0 ? sessionHistory.length : undefined,
     },
@@ -2916,10 +2976,15 @@ export default function App() {
               </p>
             </div>
           </div>
-          {isCloudMode && (
+          {isCloudMode ? (
             <div className="mt-2.5 flex items-center gap-1.5 text-[11px] text-emerald-300/90">
               <Cloud className="h-3 w-3 shrink-0" />
               <span>Supabase Cloud Sync Active</span>
+            </div>
+          ) : (
+            <div className="mt-2.5 flex items-center gap-1.5 text-[11px] text-cyan-300/90">
+              <Sparkles className="h-3 w-3 shrink-0" />
+              <span>Guest Demo Session (Local)</span>
             </div>
           )}
           <button
@@ -2928,7 +2993,7 @@ export default function App() {
             className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:border-rose-400/35 hover:bg-rose-500/10 hover:text-rose-200"
           >
             <LogOut className="h-3.5 w-3.5" />
-            Sign out
+            {session.provider === "guest" ? "Exit Guest Mode" : "Sign out"}
           </button>
         </div>
       </div>
@@ -3052,37 +3117,49 @@ export default function App() {
                     </h2>
                   </div>
 
-                  <div className="inline-flex rounded-xl border border-white/10 bg-black/35 p-1">
+                  <div className="flex flex-wrap items-center gap-2.5">
                     <button
                       type="button"
-                      onClick={() => {
-                        setInputMode("pdf");
-                        setVerifyError(null);
-                      }}
-                      className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-medium transition-all ${
-                        inputMode === "pdf"
-                          ? "bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm"
-                          : "text-slate-400 hover:text-slate-200"
-                      }`}
+                      onClick={handleLoadDemoSample}
+                      disabled={isVerifying}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-cyan-400/35 bg-cyan-500/12 px-3.5 py-2 text-xs font-medium text-cyan-200 transition-all hover:border-cyan-300/60 hover:bg-cyan-500/20 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      <Upload className="h-3.5 w-3.5" />
-                      Upload PDF
+                      <Sparkles className="h-3.5 w-3.5 text-cyan-300" />
+                      Load 4-Gap Demo Sample
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setInputMode("text");
-                        setVerifyError(null);
-                      }}
-                      className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-medium transition-all ${
-                        inputMode === "text"
-                          ? "bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm"
-                          : "text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      <FileText className="h-3.5 w-3.5" />
-                      Paste Text
-                    </button>
+
+                    <div className="inline-flex rounded-xl border border-white/10 bg-black/35 p-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setInputMode("pdf");
+                          setVerifyError(null);
+                        }}
+                        className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-medium transition-all ${
+                          inputMode === "pdf"
+                            ? "bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        <Upload className="h-3.5 w-3.5" />
+                        Upload PDF
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setInputMode("text");
+                          setVerifyError(null);
+                        }}
+                        className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-medium transition-all ${
+                          inputMode === "text"
+                            ? "bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        <FileText className="h-3.5 w-3.5" />
+                        Paste Text
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -4076,11 +4153,15 @@ export default function App() {
                     <dd className="mt-1 font-medium capitalize text-white">
                       {isCloudMode
                         ? `Supabase (${session.provider})`
-                        : "Local Session"}
+                        : session.provider === "guest"
+                          ? "Guest Demo (Local)"
+                          : "Local Session"}
                     </dd>
                   </div>
                   <div className="rounded-xl border border-white/[0.07] bg-black/25 p-3">
-                    <dt className="text-slate-400">Stored Cloud Reports</dt>
+                    <dt className="text-slate-400">
+                      {isCloudMode ? "Stored Cloud Reports" : "Saved Reports"}
+                    </dt>
                     <dd className="mt-1 font-mono font-semibold text-white">
                       {sessionHistory.length}
                     </dd>

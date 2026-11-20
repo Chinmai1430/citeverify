@@ -9,6 +9,20 @@
 
 > **Cold-Start Note:** The backend runs on Render's free tier (512 MB RAM) and may take ~30–50 seconds to wake up on the very first request after an idle period. Check the top-right **API Healthy** badge in the workbench before uploading.
 
+### Instant Evaluator Quickstart (2 Clicks — No Account Required)
+1. Open **[https://citeverify-liard.vercel.app](https://citeverify-liard.vercel.app)** and click **`Continue as Guest (Instant Demo)`**.
+2. Click **`Load 4-Gap Demo Sample`** → **`Verify Citations`** to evaluate a 4-claim benchmark live (covering Supported, Similarity Trap + Compound Split, Retracted Lancet study, and Fabricated citation abstention), or upload [`samples/demo_paper.pdf`](samples/demo_paper.pdf).
+
+### Workbench & Deep Audit Previews
+| Document Verdict & Gaps 1–4 Roll-Up | Gap 1 Similarity Trap & Gap 2 Atomic Split | Gap 4 Calibrated Uncertainty & Abstention |
+| :---: | :---: | :---: |
+| ![Report Overview](docs/screenshots/report-overview.jpg) | ![Gaps 1 and 2 Diagnostics](docs/screenshots/gaps-1-2-diagnostics.jpg) | ![Gap 4 Calibration](docs/screenshots/gap-4-calibration.jpg) |
+
+### Reference Artifacts & Sample Exports
+* **Technical Specification (8-Page Architecture Doc):** [`docs/CiteVerify-Four-Research-Grade-Gaps.pdf`](docs/CiteVerify-Four-Research-Grade-Gaps.pdf)
+* **5-Claim Clinical Benchmark Input PDF:** [`samples/demo_paper.pdf`](samples/demo_paper.pdf)
+* **Sample Exported 12-Page Audit PDF (With Gaps 1–4):** [`samples/citeverify_audit_journal_paywalls.pdf`](samples/citeverify_audit_journal_paywalls.pdf)
+
 ---
 
 ## Core Features
@@ -146,6 +160,22 @@ citeverify/
 ```
 
 ---
+
+### 3. Decoupled Quantitative Benchmark Scorecard (`eval_benchmark.py --offline`)
+
+Executed deterministically offline (`Total: 0.01s`) alongside all **35/35 unit tests passing in `0.221s`**:
+
+| Benchmark Suite | Metric | Verified Score |
+| :--- | :--- | :---: |
+| **Clinical Demo Corpus (5 Claims)** | Source Retrieval Recall | **4 / 4 (100.0%)** |
+| **Clinical Demo Corpus (5 Claims)** | Passage Recall | **4 / 4 (100.0%)** |
+| **Clinical Demo Corpus (5 Claims)** | End-to-End Verdict Accuracy | **5 / 5 (100.0%)** |
+| **Clinical Demo Corpus (5 Claims)** | Fabricated Citations Rejected | **1 / 1 (100.0%)** |
+| **Gap 1 (Hybrid Retrieval vs. NLI)** | Retrieval Recall@1 | **4 / 4 (100.0%)** |
+| **Gap 1 (Hybrid Retrieval vs. NLI)** | Logical Stance Accuracy | **4 / 4 (100.0%)** |
+| **Gap 1 (Hybrid Retrieval vs. NLI)** | Similarity Traps Caught | **2 / 2 (100.0%)** |
+| **Gap 2 (Atomic Decomposition)** | Decomposition & Aggregation Accuracy | **3 / 3 (100.0%)** |
+| **Full Automated Test Suite** | `unittest` Pass Rate (`6` suites) | **35 / 35 (0.221s)** |
 
 ## Automated Test Suite (35 Unit Tests)
 
