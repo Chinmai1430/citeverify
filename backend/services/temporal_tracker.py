@@ -547,7 +547,7 @@ def fetch_temporal_profile_live(
                 oa_resp = client.get(f"{OPENALEX_WORKS_API}/https://doi.org/{norm_doi}")
                 if oa_resp.status_code == 200:
                     work_payload = oa_resp.json()
-            elif title:
+            if not work_payload and title:
                 oa_resp = client.get(
                     OPENALEX_WORKS_API,
                     params={"search": title, "per-page": 1},
@@ -561,13 +561,14 @@ def fetch_temporal_profile_live(
                 effective_doi = norm_doi or normalize_doi(work_payload.get("doi"))
                 cited_by_url = work_payload.get("cited_by_api_url")
                 if cited_by_url and max_citing_works > 0:
-                    citing_resp = client.get(
-                        cited_by_url,
-                        params={
-                            "per-page": max_citing_works,
+                    # Merge params instead of overwriting existing ?filter=cites:W... query string
+                    merged_citing_url = httpx.URL(cited_by_url).copy_merge_params(
+                        {
+                            "per-page": str(max_citing_works),
                             "sort": "publication_year:desc",
-                        },
+                        }
                     )
+                    citing_resp = client.get(merged_citing_url)
                     if citing_resp.status_code == 200:
                         citing_payloads = citing_resp.json().get("results") or []
 
